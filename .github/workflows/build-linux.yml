@@ -41,6 +41,13 @@ jobs:
             libvulkan-memory-allocator-dev libxxhash-dev libx11-dev libxcb1-dev libzydis-dev libzycore-dev \
             libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev \
             glslang-tools glslang-dev spirv-headers libxft-dev libfontconfig-dev libfreetype-dev
+      # Debian's headers (1.4.309) lack newer driver ids the GPU code uses (eMesaKosmickrisp);
+      # /usr/local/include comes before /usr/include, so these replace them for the build.
+      - name: Vulkan headers 1.4.344
+        run: |
+          git clone -q --depth 1 -b v1.4.344 https://github.com/KhronosGroup/Vulkan-Headers.git /tmp/vulkan-headers
+          cmake -S /tmp/vulkan-headers -B /tmp/vulkan-headers/build -G Ninja -DCMAKE_INSTALL_PREFIX=/usr/local >/dev/null
+          cmake --install /tmp/vulkan-headers/build >/dev/null
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || '' }}
