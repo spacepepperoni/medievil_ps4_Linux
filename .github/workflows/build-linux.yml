@@ -1,0 +1,80 @@
+# Builds the Linux / Steam Deck AppImage. Every build of main is published as a release
+# (v<upstream version>-linux.<run>), which the launcher's update check looks for.
+name: Build Linux/Steam Deck
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**', '.github/workflows/sync-upstream.yml', '.github/workflows/release.yml']
+  pull_request:
+    paths-ignore: ['**.md', 'docs/**']
+  workflow_dispatch:
+  # sync-upstream.yml builds a merge of an upstream release before it reaches main (no release then).
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-linux-${{ inputs.ref || github.ref }}
+  # A release build on main runs to the end (a newer push waits behind it); others are replaced.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' || inputs.ref != '' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Debian 13: glibc 2.41, no newer than SteamOS 3.7+, and an SDL3 package.
+    container: debian:trixie
+    timeout-minutes: 150
+    steps:
+      - name: Dependencies
+        run: |
+          apt-get update -q
+          DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends \
+            git ca-certificates curl clang lld llvm g++ make cmake ninja-build pkgconf file binutils patchelf \
+            python3 desktop-file-utils squashfs-tools zip unzip \
+            libsdl3-dev libvulkan-dev libfmt-dev libboost-dev robin-map-dev \
+            libvulkan-memory-allocator-dev libxxhash-dev libx11-dev libxcb1-dev libzydis-dev libzycore-dev \
+            libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev \
+            glslang-tools glslang-dev spirv-headers libxft-dev libfontconfig-dev libfreetype-dev
+      # Debian's headers (1.4.309) lack newer driver ids the GPU code uses (eMesaKosmickrisp);
+      # /usr/local/include comes before /usr/include, so these replace them for the build.
+      - name: Vulkan headers 1.4.344
+        run: |
+          git clone -q --depth 1 -b v1.4.344 https://github.com/KhronosGroup/Vulkan-Headers.git /tmp/vulkan-headers
+          cmake -S /tmp/vulkan-headers -B /tmp/vulkan-headers/build -G Ninja -DCMAKE_INSTALL_PREFIX=/usr/local >/dev/null
+          cmake --install /tmp/vulkan-headers/build >/dev/null
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || '' }}
+          submodules: recursive
+          fetch-depth: 0
+      - name: Build
+        run: |
+          git config --global --add safe.directory '*'
+          CC=clang CXX=clang++ bash build.sh
+      - name: Package
+        run: |
+          version=$(sed -n "s/^VERSION = '\(.*\)'/\1/p" launcher/medievil_launcher.py | head -1)
+          echo "TAG=v$version-linux.${{ github.run_number }}" >> "$GITHUB_ENV"
+          # The launcher reads its build number from here (medievil_linux.LINUX_BUILD).
+          echo "${{ github.run_number }}" > launcher/linux_build.txt
+          bash packaging/linux/appimage.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: medievil-linux
+          path: dist/MediEvil-x86_64.AppImage
+          if-no-files-found: error
+      - name: Release
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && !inputs.ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          apt-get install -yq --no-install-recommends gh >/dev/null
+          gh release create "$TAG" dist/MediEvil-x86_64.AppImage --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --title "$TAG" \
+            --notes "MediEvil for Linux/Steam Deck, built from $(git log -1 --format='%h %s'). Install steps: see the README."

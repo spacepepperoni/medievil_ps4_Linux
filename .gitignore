@@ -27,3 +27,4 @@ patches.json
 
 # Local test/RE output of tools/dev (screenshots, logs, extracted game assets)
 tools/dev/runs/
+launcher/linux_build.txt

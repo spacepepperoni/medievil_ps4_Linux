@@ -219,8 +219,8 @@ cp launcher/medievil.png "$app/medievil-pc.png"
 cat > "$app/usr/share/applications/medievil-pc.desktop" <<'EOF'
 [Desktop Entry]
 Type=Application
-Name=MediEvil (PC)
-Comment=MediEvil (PS4, 2019) running natively on Linux from your own copy of the game
+Name=MediEvil
+Comment=MediEvil (PS4) for Linux/Steam Deck, from your own copy of the game
 Exec=AppRun
 Icon=medievil-pc
 Terminal=false
@@ -234,8 +234,8 @@ cat > "$app/usr/share/metainfo/medievil-pc.appdata.xml" <<'EOF'
   <id>medievil-pc</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-2.0-or-later</project_license>
-  <name>MediEvil (PC)</name>
-  <summary>Native PC port runtime for MediEvil (PS4); bring your own game files</summary>
+  <name>MediEvil for Linux/Steam Deck</name>
+  <summary>MediEvil (PS4) for Linux and the Steam Deck; bring your own game files</summary>
   <description><p>Runs the PlayStation 4 MediEvil executable from your own copy of the game. No game files included.</p></description>
   <launchable type="desktop-id">medievil-pc.desktop</launchable>
   <url type="homepage">https://github.com/bc160201983/medievil_2019_pc_port</url>
