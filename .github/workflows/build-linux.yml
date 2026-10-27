@@ -36,7 +36,7 @@ jobs:
           apt-get update -q
           DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends \
             git ca-certificates curl clang lld llvm g++ make cmake ninja-build pkgconf file binutils patchelf \
-            python3 desktop-file-utils squashfs-tools \
+            python3 desktop-file-utils squashfs-tools zip unzip \
             libsdl3-dev libvulkan-dev libfmt-dev libboost-dev robin-map-dev \
             libvulkan-memory-allocator-dev libxxhash-dev libx11-dev libxcb1-dev libzydis-dev libzycore-dev \
             libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev \
