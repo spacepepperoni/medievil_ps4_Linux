@@ -79,5 +79,5 @@ of the system it was built on, so build on the oldest one you want to support):
   restart* restarts through `run.py` on both systems, *Open folder* uses `xdg-open`, *Create
   shortcut* writes a `.desktop` file, the launcher follows the system language, and the game's
   own fonts are used for the launcher through fontconfig.
-- The automatic updater is Windows-only (it is off in both builds; new versions are on the
+- Linux fork: the AppImage updates itself from spacepepperoni/medievil_ps4_Linux's releases (from the launcher, and beside the game when Steam starts it with `--play`); Advanced has *Add to Steam*, and Display has *Steam Deck mode*.
   releases page).

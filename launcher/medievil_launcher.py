@@ -47,6 +47,7 @@ else:
 CONFIG_FILE = CONFIG_DIR / 'settings.json'
 MOD_PRESETS = DATA_DIR / 'mods_presets.json'
 APP_NAME = 'MediEvil'
+PLATFORM = 'PC' if WINDOWS else 'Linux/Steam Deck'  # Linux fork: the window title
 MAX_LOG_LINES = 6000
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 # This build. The launcher checks the GitHub releases at start and offers newer versions.
@@ -54,6 +55,11 @@ VERSION = '1.3.7'
 RELEASES_API = 'https://api.github.com/repos/bc160201983/medievil_2019_pc_port/releases/latest'
 RELEASES_PAGE = 'https://github.com/bc160201983/medievil_2019_pc_port/releases'
 UPDATE_DIR = Path(tempfile.gettempdir()) / 'medievil-update'
+if not WINDOWS:  # Linux fork: releases, version and updates come from the fork
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import medievil_linux  # noqa: E402
+    VERSION = medievil_linux.version(VERSION)
+    RELEASES_API, RELEASES_PAGE = medievil_linux.RELEASES_API, medievil_linux.RELEASES_PAGE
 # Never copied over an installation by an update (the package does not hold them either).
 USER_FILES = ('user', 'out', 'mods', 'medievil.ini', 'mods.json', 'mods_presets.json', 'patches.json', 'last_run.log',
               'launcher-data', 'portable.txt')
@@ -170,6 +176,8 @@ APP_DEFAULTS = {'ui_language': 'en', 'game_dir': os.environ.get('GOW3_GAME_DIR',
                 'vk_validation': False, 'close_on_play': False,
                 'update_check': True, 'game_patches': {}, 'controls': {}, 'pad_style': 'playstation', 'stick_range': '',
                 'last_pkg': ''}
+if not WINDOWS:  # Linux fork: Steam Deck mode
+    APP_DEFAULTS.update(medievil_linux.APP_DEFAULTS)
 
 # PS4 button, default key, default gamepad button (SDL names; src/runtime_pad.c). L2/R2 come
 # from the analog triggers and are not remapped on the gamepad.
@@ -470,7 +478,8 @@ class Launcher:
     def __init__(self, root, tk, ttk, filedialog, messagebox):
         self.tk, self.ttk, self.filedialog, self.messagebox = tk, ttk, filedialog, messagebox
         self.root = root
-        self.app = {**APP_DEFAULTS, **load_json(CONFIG_FILE, {})}
+        self.loaded_app = load_json(CONFIG_FILE, {})  # Linux fork: what the player has saved
+        self.app = {**APP_DEFAULTS, **self.loaded_app}
         if self.app.get('readbacks') == '2':  # "Precise" is no longer offered (issue #15)
             self.app['readbacks'] = ''
         self.ini, self.ini_lines = load_ini()
@@ -481,7 +490,7 @@ class Launcher:
         self.banner_source = self.banner_image = None
         self.ui_calls = queue.Queue()  # work for the Tk thread from helper threads
         self.mod_order, self.mod_vars, self.patch_vars = [], {}, {}
-        root.title(f'{APP_NAME} (PC)')
+        root.title(f'{APP_NAME} ({PLATFORM})')
         if sys.platform == 'win32':
             try:  # the taskbar shows this window's icon, not Python's
                 import ctypes
@@ -497,6 +506,8 @@ class Launcher:
         self.set_icon()
         self.style()
         self.build()
+        if not WINDOWS:  # Linux fork
+            medievil_linux.deck_start(self, INI_FLAGS)
         self.show('home')
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.after(100, self.drain_output)
@@ -667,6 +678,8 @@ class Launcher:
         show()
         box.bind('<<ComboboxSelected>>', lambda _e: var.set(values[box.current()]))
         var.trace_add('write', show)
+        if not WINDOWS:  # Linux fork: Steam Deck mode locks some of these
+            medievil_linux.track_widget(self, key, box)
         return box
 
     def next_row(self, parent):
@@ -692,6 +705,8 @@ class Launcher:
 
     def check(self, parent, key, store, title, hint=None, var=None, restart=False):
         box = self.ttk.Checkbutton(parent, variable=var if var is not None else self.var(key, store))
+        if not WINDOWS:  # Linux fork: Steam Deck mode locks some of these
+            medievil_linux.track_widget(self, key, box)
         return self.row(parent, title, box, hint, restart)
 
     def note(self, parent, text, top=12):
@@ -767,7 +782,9 @@ class Launcher:
                                    fg=GOLD, font=self.f('logo', 20), bd=0)
         self.side_title.pack(anchor='center', pady=(22, 4))
         tk.Label(side, text=_('PC edition'), bg=BG, fg=ACCENT_HI, font=self.f('head', 12), bd=0).pack(
-            anchor='center', pady=(0, 20))
+            anchor='center', pady=(0, 2 if not WINDOWS else 20))
+        if not WINDOWS:  # Linux fork: who made this build, with Tux
+            medievil_linux.fork_line(self, side, BG, GOLD, TEXT)
         self.side = side
         self.nav, self.current_page = {}, None
         for name, title in (('home', _('Home')), ('display', _('Display')), ('performance', _('Performance')),
@@ -1010,7 +1027,9 @@ class Launcher:
     def build_display(self):
         tk, ttk = self.tk, self.ttk
         f = self.scrolled_page('display', _('Display'), _('How the game appears on your screen.'))
-        self.section(f, _('Window', 'Окно'), top=4)
+        if not WINDOWS:  # Linux fork
+            medievil_linux.build_deck_section(self, f, _, INI_FLAGS)
+        self.section(f, _('Window', 'Окно'), top=4 if WINDOWS else 20)
         self.row(f, _('Display mode'), self.choice(f, 'display_mode', 'ini', DISPLAY_MODES),
                  _('Borderless covers the screen without changing the display mode.'))
         self.check(f, 'vsync', 'ini', _('VSync'), _('Off allows tearing for the lowest latency.'))
@@ -1417,6 +1436,9 @@ class Launcher:
         holder = ttk.Frame(f)
         holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(10, 0))
         ttk.Button(holder, text=_('Desktop shortcut', 'Ярлык на рабочем столе'), command=self.shortcut).pack(side='left')
+        if not WINDOWS:  # Linux fork
+            ttk.Button(holder, text=_('Add to Steam'), command=lambda: medievil_linux.add_to_steam(
+                self, __file__, CONFIG_DIR, PORT_DIR, _, APP_NAME)).pack(side='left', padx=(8, 0))
         ttk.Button(holder, text=_('Check for updates', 'Проверить обновления'),
                    command=lambda: threading.Thread(target=self.check_update, args=(True,), daemon=True).start()).pack(
             side='left', padx=(8, 0))
@@ -1487,7 +1509,7 @@ class Launcher:
         folder = self.var('game_dir', 'app').get()
         info = game_info(folder)
         title = info[0] if info else APP_NAME
-        self.root.title(f'{title} (PC)')
+        self.root.title(f'{title} ({PLATFORM})')
         self.side_title.configure(text=title.upper())
         if self.current_page == 'patches':
             self.refresh_game_patches()
@@ -1846,6 +1868,8 @@ class Launcher:
         if self.process:
             self.messagebox.showinfo(APP_NAME, _('Close the game before updating.', 'Закройте игру перед обновлением.'))
             return
+        if not WINDOWS:  # Linux fork: the AppImage replaces itself
+            return medievil_linux.install_update(self, version, url, page, _, APP_NAME)
         if not FROZEN or not url:  # a source tree updates with git
             webbrowser.open(page)
             return
@@ -1919,7 +1943,7 @@ class Launcher:
                 if source.is_file():
                     shutil.copyfile(source, icon)
                     break
-            entry = ('[Desktop Entry]\nType=Application\nName=MediEvil\nComment=MediEvil (PS4) for PC\n'
+            entry = ('[Desktop Entry]\nType=Application\nName=MediEvil\nComment=MediEvil (PS4) for Linux/Steam Deck\n'
                      f'Exec={command}\nIcon={icon}\nTerminal=false\nCategories=Game;\n')
             data_home = Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local' / 'share')
             targets = [data_home / 'applications' / 'medievil-pc.desktop']
@@ -2003,6 +2027,8 @@ def play_without_window(settings):
     attach_stdio()
     log_dir = Path(settings.get('user_dir') or DATA_DIR / 'user')
     log_dir.mkdir(parents=True, exist_ok=True)
+    if not WINDOWS:  # Linux fork: Steam/Game Mode never opens the launcher, so update beside the game
+        medievil_linux.update_in_background(latest_release, version_tuple, VERSION, settings)
     with open(log_dir / 'last_run.log', 'w', encoding='utf-8', buffering=1) as log:
         process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=game_environment(settings),
                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -2028,8 +2054,9 @@ def latest_release():
     with urllib.request.urlopen(request, timeout=15) as response:
         release = json.load(response)
     version = '.'.join(re.findall(r'\d+', release['tag_name']))
+    wanted = '.zip' if WINDOWS else medievil_linux.ASSET.lower()  # Linux fork: the AppImage
     url = next((asset['browser_download_url'] for asset in release.get('assets', [])
-                if asset.get('name', '').lower().endswith('.zip')), None)
+                if asset.get('name', '').lower().endswith(wanted)), None)
     return version, url, release.get('html_url') or RELEASES_PAGE
 
 

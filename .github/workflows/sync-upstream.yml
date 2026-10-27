@@ -1,0 +1,113 @@
+# Keeps this fork up to date with upstream's RELEASES (bc160201983/medievil_2019_pc_port), not
+# every upstream commit. When upstream publishes a new release tag, that tag is merged into the
+# branch upstream-merge, the Linux build runs on it, and only a passing merge reaches main (which
+# then publishes a release). README.md is the fork's own: when both sides changed it, the fork's
+# version is kept. A conflict or a failing build opens a pull request instead, to be resolved by
+# hand; main is not touched. The `upstream` branch is an exact copy of upstream's main.
+name: Sync with upstream
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Upstream tag to merge (empty = upstream's latest release)
+        default: ''
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: sync-upstream
+
+env:
+  UPSTREAM: bc160201983/medievil_2019_pc_port
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    outputs:
+      result: ${{ steps.merge.outputs.result }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Merge upstream's release into upstream-merge
+        id: merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          tag='${{ inputs.tag }}'
+          [ -n "$tag" ] || tag=$(gh release view --repo "$UPSTREAM" --json tagName -q .tagName)
+          echo "Upstream release: $tag"
+          git remote add upstream "https://github.com/$UPSTREAM.git"
+          git fetch --no-tags upstream main:refs/remotes/upstream/main "refs/tags/$tag:refs/upstream-tags/$tag"
+          git push --force origin upstream/main:refs/heads/upstream
+          if git merge-base --is-ancestor "refs/upstream-tags/$tag" HEAD; then
+            echo 'Already has it.'; echo 'result=current' >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          git checkout -B upstream-merge
+          if ! git merge --no-edit -m "Merge upstream $tag" "refs/upstream-tags/$tag"; then
+            git checkout --ours README.md 2>/dev/null && git add README.md || true
+            if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+              files=$(git diff --name-only --diff-filter=U | sed 's/^/- /')
+              git merge --abort
+              git push --force origin "refs/upstream-tags/$tag:refs/heads/upstream-release"
+              if [ -z "$(gh pr list --head upstream-release --base main --state open --json number -q '.[].number')" ]; then
+                gh pr create --head upstream-release --base main --title "Upstream $tag needs a manual merge" \
+                  --body "Merging upstream $tag into main conflicts in:
+          $files
+
+          Resolve the conflicts in this pull request, then merge it."
+              fi
+              echo 'result=conflict' >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            git commit --no-edit
+          fi
+          git push --force origin HEAD:refs/heads/upstream-merge
+          echo 'result=merged' >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: merge
+    if: needs.merge.outputs.result == 'merged'
+    uses: ./.github/workflows/build-linux.yml
+    with:
+      ref: upstream-merge
+
+  land:
+    needs: [merge, build]
+    if: always() && needs.merge.outputs.result == 'merged'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Put the merge on main, or open a pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD: ${{ needs.build.result }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin upstream-merge
+          if [ "$BUILD" = success ]; then
+            # main may have moved while the build ran (README edits): merge, keeping its README.
+            if git merge --no-edit origin/upstream-merge || { git checkout --ours README.md && git add README.md && git commit --no-edit; }; then
+              git push origin HEAD:main
+              git push origin --delete upstream-merge || true  # staging only; main has it now
+              gh workflow run build-linux.yml --ref main
+              exit 0
+            fi
+          fi
+          if [ -z "$(gh pr list --head upstream-merge --base main --state open --json number -q '.[].number')" ]; then
+            gh pr create --head upstream-merge --base main --title 'Upstream release breaks the Linux build' \
+              --body "The latest upstream release merges cleanly but the Linux build failed (build result: $BUILD), so main was left as it is. See the Sync with upstream run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Fix the build on the upstream-merge branch, then merge this pull request."
+          fi
+          exit 1

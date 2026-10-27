@@ -1,3 +1,52 @@
+# MediEvil (PS4) for Linux/Steam Deck
+**WORK IN PROGRESS: not yet tested on the Steam Deck.**
+
+**MediEvil (PS4, 2019) running natively on Linux and the Steam Deck, forked by spacepepperoni from [bc160201983's MediEvil PC port](https://github.com/bc160201983/medievil_2019_pc_port).**
+
+**This is an AppImage with a launcher that starts MediEvil, adds it to your desktop or adds it to your Steam library. This fork adds automatic updates, Add to Steam and a Steam Deck mode that sets the game up for the Deck.**
+
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/spacepepperoni/medievil_ps4_Linux/main/install.sh | sh
+```
+
+## Uninstall
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/spacepepperoni/medievil_ps4_Linux/main/install.sh | sh -s -- --uninstall
+```
+
+## AppImage
+1. Download **[MediEvil-x86_64.AppImage](https://github.com/spacepepperoni/medievil_ps4_Linux/releases/latest/download/MediEvil-x86_64.AppImage)**.
+2. Right-click it, open **Properties → Permissions** and tick **Is executable** (or
+   **Allow executing file as program**).
+
+## Updates
+
+The launcher checks this fork's releases when it opens (Advanced → *Check for updates when the
+launcher opens* turns it off). When a new version is out, the sidebar offers to install it.
+When MediEvil is started from Steam or Game Mode, the update downloads beside the game and is
+used the next time it starts.
+
+## Steam Deck
+- Install the [AppImage](https://github.com/spacepepperoni/medievil_ps4_Linux/releases/latest/download/MediEvil-x86_64.AppImage),
+  open it once in Desktop Mode, choose your game folder, then press **Advanced → Add to Steam** to play in Game Mode.
+- In the Display tab, **Steam Deck mode** is turned on automatically on SteamOS: fullscreen,
+  720p native output, Low graphics quality and a 60 or 30 FPS cap. Turn it off to choose your own settings again.
+
+## Files needed
+
+You need your own copy of MediEvil (PS4, CUSA11227 or the European CUSA12982), as an unpacked
+folder (with `eboot.bin`) or a fake package (`.pkg`). Point the launcher to it on the Game page.
+No game files are included.
+
+Requirements, building and file locations: [packaging/linux/README-Linux.md](packaging/linux/README-Linux.md).
+
+---
+
+*The upstream README follows.*
+
 # MediEvil (PS4) for PC
 
 A PC port of **MediEvil** (PlayStation 4, 2019, CUSA11227; the European CUSA12982 works too) for
