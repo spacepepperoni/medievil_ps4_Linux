@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+#include <string_view>
 #include <xxhash.h>
 #include "video_core/amdgpu/liverpool.h"
 
@@ -164,6 +166,22 @@ void TextureCache::CancelReadbacks(VAddr address, u64 size) {
 // before) left the GPU mostly idle in God of War III's gameplay, at about 2 FPS.
 void TextureCache::ProcessDownloadImages() {
     if (deferred_readbacks) {
+        // Linux fork: nothing to download and no readback to write back means no page changes
+        // and no RAM write here: then the wait for the host copies guards nothing. It ran at
+        // every fence (~70 a frame) and was most of the GPU thread's 17-24% "blocked on host
+        // copies" in MediEvil's levels on the Steam Deck. GOW3_DOWNLOAD_WAIT=always: as before.
+        static const bool always_wait = [] {
+            const char* env = std::getenv("GOW3_DOWNLOAD_WAIT");
+            return env && std::string_view{env} == "always";
+        }();
+        bool idle;
+        {
+            std::unique_lock lock{download_images_mutex};
+            idle = download_images.empty();
+        }
+        if (idle && !always_wait && !has_pending_readbacks.load(std::memory_order_acquire)) {
+            return;
+        }
         // Upload workers must finish reading RAM before these pages become inaccessible.
         scheduler.WaitHostCopies();
         std::scoped_lock readback_lock{readback_mutex};
