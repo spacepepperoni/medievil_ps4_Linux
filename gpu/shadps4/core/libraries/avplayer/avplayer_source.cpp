@@ -323,6 +323,17 @@ bool AvPlayerSource::Stop() {
         m_up_data_streamer->Reset();
     }
 
+    // Linux fork: all three asked to stop first, then every queue they can sleep on woken, then
+    // joined. A decoder could miss the stop request's own wake-up (it came between its check and
+    // its wait) and sleep on: sceAvPlayerStop then hung the game, after the first level on the
+    // Steam Deck, until some signal woke that thread.
+    m_video_decoder_thread.RequestStop();
+    m_audio_decoder_thread.RequestStop();
+    m_demuxer_thread.RequestStop();
+    m_video_packets_cv.Notify();
+    m_audio_packets_cv.Notify();
+    m_video_buffers_cv.Notify();
+    m_audio_buffers_cv.Notify();
     m_video_decoder_thread.Stop();
     m_audio_decoder_thread.Stop();
     m_demuxer_thread.Stop();

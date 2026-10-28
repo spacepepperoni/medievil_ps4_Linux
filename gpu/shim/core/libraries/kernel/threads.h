@@ -47,6 +47,11 @@ public:
         }
     }
     bool Joinable() const { return thread.joinable(); }
+    // Linux fork: ask the thread to stop without waiting, so whatever it sleeps on can be woken
+    // before the join (AvPlayerSource::Stop).
+    void RequestStop() {
+        if (thread.joinable()) thread.request_stop();
+    }
     void Stop() {
         if (thread.joinable()) {
             thread.request_stop();
