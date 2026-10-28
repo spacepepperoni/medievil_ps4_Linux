@@ -16,6 +16,11 @@
 #include <time.h>
 #include <SDL3/SDL.h>
 #include <sys/stat.h>
+#ifdef __linux__
+#include <fcntl.h>
+#include <poll.h>
+#include <unistd.h>
+#endif
 
 #define ERR_INVALID_ARG ((int32_t)0x80920001)
 #define ERR_INVALID_HANDLE ((int32_t)0x80920003)
@@ -226,6 +231,94 @@ static int back_grips_down(void) {
         if (SDL_GetGamepadButton(gamepads[p],SDL_GAMEPAD_BUTTON_LEFT_PADDLE1) &&
             SDL_GetGamepadButton(gamepads[p],SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1)) return 1;
     return 0;
+}
+/* Linux fork: R4 alone (or F10) writes a marker into the log, so a player can flag the moment a
+ * glitch shows ("MARK n"), with the frame position and, under gamescope, a screenshot in
+ * <user dir>/marks/. Games started from Steam see Steam's virtual controller, which has no back
+ * grips, so on a Steam Deck R4 is also read straight from the controller's hidraw device
+ * (28de:1205; reports are delivered to every reader, Steam keeps its own). */
+static volatile int deck_r4_down;
+#ifdef __linux__
+static void *deck_grip_thread(void *arg) {
+    (void)arg;
+    int fds[8], count=0;
+    for (int n=0;n<32 && count<8;++n) {
+        char path[96], line[256]; int match=0;
+        snprintf(path,sizeof(path),"/sys/class/hidraw/hidraw%d/device/uevent",n);
+        FILE *f=fopen(path,"r");
+        if (!f) continue;
+        while (fgets(line,sizeof(line),f)) if (strstr(line,"HID_ID=0003:000028DE:00001205")) match=1;
+        fclose(f);
+        if (!match) continue;
+        snprintf(path,sizeof(path),"/dev/hidraw%d",n);
+        const int fd=open(path,O_RDONLY);
+        if (fd>=0) fds[count++]=fd;
+    }
+    if (!count) return NULL;
+    printf("Runtime: R4 marks the log (read from %d Steam Deck controller device%s)\n",count,count>1 ? "s" : "");
+    struct pollfd p[8];
+    for (int i=0;i<count;++i) p[i]=(struct pollfd){fds[i],POLLIN,0};
+    unsigned char buf[64];
+    while (count) {
+        if (poll(p,count,-1)<0) continue;
+        for (int i=0;i<count;++i) {
+            if (!(p[i].revents & POLLIN)) { if (p[i].revents & (POLLERR|POLLHUP|POLLNVAL)) p[i].fd=-1; continue; }
+            const ssize_t r=read(p[i].fd,buf,sizeof(buf));
+            if (r==64 && buf[0]==1 && buf[1]==0 && buf[2]==9 && buf[3]==64) {
+                uint32_t high; memcpy(&high,buf+12,4);
+                deck_r4_down=(high & 0x400)!=0; /* STEAMDECK_HBUTTON_R4 */
+            }
+        }
+    }
+    return NULL;
+}
+#endif
+static int marker_down(void) {
+    static int started;
+    if (!started) {
+        started=1;
+#ifdef __linux__
+        pthread_t t;
+        if (!pthread_create(&t,NULL,deck_grip_thread,NULL)) pthread_detach(t);
+#endif
+    }
+    const bool *k=SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
+    if (k && k[SDL_SCANCODE_F10]) return 1;
+    if (deck_r4_down) return 1;
+    for (int p=0;p<gamepad_count;++p)
+        if (SDL_GetGamepadButton(gamepads[p],SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1) &&
+            !SDL_GetGamepadButton(gamepads[p],SDL_GAMEPAD_BUTTON_LEFT_PADDLE1)) return 1;
+    return 0;
+}
+static void marker_poll(void) {
+    static int was_down, count;
+    static uint64_t start;
+    if (!start) start=now_us();
+    const int down=marker_down();
+    if (down && !was_down) {
+        uint32_t segment, frame; gow3gpu_frame_position(&segment,&frame);
+        time_t now=time(NULL); struct tm tm;
+#ifdef _WIN32
+        localtime_s(&tm,&now);
+#else
+        localtime_r(&now,&tm);
+#endif
+        ++count;
+        printf("MARK %d: %02d:%02d:%02d, %.1f s into the session, segment %u frame %u (the player pressed R4/F10)\n",
+               count,tm.tm_hour,tm.tm_min,tm.tm_sec,(now_us()-start)/1e6,segment,frame);
+#ifndef _WIN32
+        if (getenv("GAMESCOPE_WAYLAND_DISPLAY")) {
+            char dir[4096], cmd[8400];
+            snprintf(dir,sizeof(dir),"%s/marks",runtime_file_user_dir());
+            mkdir(dir,0755);
+            snprintf(cmd,sizeof(cmd),"env -u LD_LIBRARY_PATH -u LD_PRELOAD gamescopectl screenshot '%s/mark-%04d%02d%02d-%02d%02d%02d-%d.png' >/dev/null 2>&1 &",
+                     dir,tm.tm_year+1900,tm.tm_mon+1,tm.tm_mday,tm.tm_hour,tm.tm_min,tm.tm_sec,count);
+            if (system(cmd)) {}
+        }
+#endif
+        fflush(stdout);
+    }
+    was_down=down;
 }
 /* GOW3_STICK_RANGE=<percent> (launcher: Stick range): that much tilt counts as a full push, for
  * sticks that never reach the edge (some hall-effect pads, issue #36). Default 100. */
@@ -527,6 +620,7 @@ static void sample(PadData *d) {
     sample_host(d);
     if (gow3gpu_overlay_captures_input()) { hold_after_capture=1; return; }
     record_sample(d);
+    if (sdl_ready>0) marker_poll();
     read_inject();
     replay_sample(d);
     d->buttons|=injected.buttons;
