@@ -224,6 +224,7 @@ private:
 
     AvPlayerQueue<Frame> m_audio_frames;
     AvPlayerQueue<Frame> m_video_frames;
+    void MovieStats(bool shown, s64 late_ms); // Linux fork: GOW3_FRAME_STATS
 
     std::optional<Frame> m_current_video_frame;
     std::optional<Frame> m_current_audio_frame;

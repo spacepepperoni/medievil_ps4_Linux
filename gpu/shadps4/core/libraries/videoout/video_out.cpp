@@ -152,10 +152,7 @@ s32 PS4_SYSV_ABI sceVideoOutIsFlipPending(s32 handle) {
     return pending;
 }
 
-void NoteGuestFlip(); // Linux fork: driver.cpp, "Game pacing"
-
 s32 PS4_SYSV_ABI sceVideoOutSubmitFlip(s32 handle, s32 bufferIndex, s32 flipMode, s64 flipArg) {
-    NoteGuestFlip();
     auto* port = driver->GetPort(handle);
     if (!port) {
         LOG_ERROR(Lib_VideoOut, "Invalid handle = {}", handle);

@@ -11,6 +11,9 @@
 #include "core/memory.h"
 
 #include <magic_enum/magic_enum.hpp>
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -375,7 +378,16 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
     const auto current_time = CurrentTime();
     const auto& new_frame = m_video_frames.Front();
     if (m_state.GetSyncMode() == AvPlayerAvSyncMode::Default) {
-        if (new_frame.info.timestamp > current_time) {
+        // Linux fork: a frame is due up to half a 30 FPS frame early. Only at or after its
+        // time, a 30 FPS game asking for a 30 FPS movie found the next frame a hair early now
+        // and then, showed the last one again and caught up later: jittery cutscenes in Steam
+        // Deck mode. GOW3_MOVIE_EARLY_MS (default 16, 0 = only when due).
+        static const s64 early_ms = [] {
+            const char* env = std::getenv("GOW3_MOVIE_EARLY_MS");
+            return env ? std::max(0, std::atoi(env)) : 16;
+        }();
+        if (s64(new_frame.info.timestamp) > s64(current_time) + early_ms) {
+            MovieStats(false, 0);
             return false;
         }
     }
@@ -388,9 +400,41 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
 
     auto frame = m_video_frames.Pop();
     video_info = frame->info;
+    MovieStats(true, s64(current_time) - s64(frame->info.timestamp));
 
     m_current_video_frame = std::move(frame);
     return true;
+}
+
+// Linux fork: GOW3_FRAME_STATS=1 prints every 5 s how evenly movie frames reached the game:
+// frames handed out, polls that found none due (the last frame shown again) and late frames.
+void AvPlayerSource::MovieStats(bool shown, s64 late_ms) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_FRAME_STATS");
+        return env && env[0] == '1';
+    }();
+    if (!enabled) {
+        return;
+    }
+    static std::mutex mutex;
+    static u32 frames, repeats, late;
+    static auto window = std::chrono::steady_clock::now();
+    std::scoped_lock lock{mutex};
+    if (shown) {
+        ++frames;
+        late += late_ms > 33;
+    } else {
+        ++repeats;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - window >= std::chrono::seconds(5)) {
+        if (frames) {
+            std::printf("Movie frames: %u shown, %u polls without a new one, %u late (>33 ms)\n",
+                        frames, repeats, late);
+        }
+        frames = repeats = late = 0;
+        window = now;
+    }
 }
 
 bool AvPlayerSource::GetAudioData(AvPlayerFrameInfo& audio_info) {

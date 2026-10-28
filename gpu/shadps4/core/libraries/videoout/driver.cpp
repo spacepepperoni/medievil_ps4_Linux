@@ -641,6 +641,11 @@ void NoteGuestFlip() {
 
 bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
                                 bool is_eop /*= false*/) {
+    // Linux fork: every flip the game submits (its own calls and end-of-pipe flips from its
+    // command buffers), for Game pacing.
+    if (index != -1) {
+        NoteGuestFlip();
+    }
     {
         std::unique_lock lock{port->port_mutex};
         if (index != -1 && port->flip_status.flip_pending_num > 16) {
