@@ -210,7 +210,7 @@ private:
     /// next to them. The CPU write goes on at once; the GPU bytes are merged into guest memory
     /// once the submission is done (bytes the CPU changed meanwhile are kept and uploaded), and
     /// until then uploads from guest memory leave these ranges out (the arena holds the newer
-    /// GPU data). GOW3_DEFER_DOWNLOADS=0: wait for the submission instead.
+    /// GPU data). Off by default (a nested fault deadlocked); GOW3_DEFER_DOWNLOADS=1: on.
     struct PendingMerge {
         VAddr start, end;
         u64 tick;

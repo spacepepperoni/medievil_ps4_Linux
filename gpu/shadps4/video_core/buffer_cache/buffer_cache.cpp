@@ -325,9 +325,12 @@ bool BufferCache::DownloadMapped(std::span<const std::pair<VAddr, VAddr>> ranges
         }
     }
     if (!scheduler.IsFree(tick)) {
+        // Off by default: the snapshot below read a protected guest page inside the fault
+        // handler, whose nested fault spun on pending_lock (MediEvil hung after the opening
+        // cinematic on the Steam Deck). GOW3_DEFER_DOWNLOADS=1: on, for tests.
         static const bool defer = [] {
             const char* env = std::getenv("GOW3_DEFER_DOWNLOADS");
-            return !(env && env[0] == '0');
+            return env && env[0] == '1';
         }();
         // Guest pages are readable here unless readbacks are Precise (GPU data read-protected).
         // Only for a CPU write: a CPU read needs the data now.
