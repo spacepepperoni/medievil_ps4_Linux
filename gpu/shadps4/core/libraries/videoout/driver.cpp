@@ -25,6 +25,7 @@
 #include "core/emulator_settings.h"
 #include "core/libraries/kernel/time.h"
 #include "core/libraries/videoout/driver.h"
+bool Gow3MoviePlaying(); // Linux fork: gow3gpu.cpp
 #include "core/libraries/videoout/videoout_error.h"
 #include "imgui/renderer/imgui_core.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -718,7 +719,33 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     const auto current_limit = [&] {
         // -1: half the display refresh, so each frame shows for exactly two refreshes.
         const int raw = Gow3Settings::Get().fps_limit.load();
-        const u32 user = raw < 0 ? Gow3DisplayRefreshHz() / 2 : u32(raw);
+        u32 user = raw < 0 ? Gow3DisplayRefreshHz() / 2 : u32(raw);
+        // Linux fork: the game's 30 FPS movies against a 30 FPS limit showed a frame twice or
+        // skipped one whenever the game sampled its clock a little early or late (jittery
+        // cutscenes on the Steam Deck). While a movie plays a limit below 60 steps aside, so
+        // each movie frame shows for two 60 Hz refreshes, but only while the frames are little
+        // more than the movie (a handful of draws): MediEvil also keeps a video running behind
+        // its in-engine title cinematic and menu, hundreds of draws a frame, which the Deck
+        // does not hold at 60 (it judders between 16.7 and 50 ms frames). GOW3_MOVIE_LIMIT=1
+        // keeps the limit.
+        static const bool keep_for_movies = [] {
+            const char* env = std::getenv("GOW3_MOVIE_LIMIT");
+            return env && env[0] == '1';
+        }();
+        static u64 last_draws, last_flips;
+        static double draws_per_frame = 1e9;
+        static bool movie_only;
+        const u64 all_draws = Gow3Stats::draws.load(std::memory_order_relaxed);
+        const u64 flips = u64(main_port.flip_status.count);
+        if (flips - last_flips >= 8) {
+            draws_per_frame = double(all_draws - last_draws) / double(flips - last_flips);
+            last_draws = all_draws;
+            last_flips = flips;
+            movie_only = movie_only ? draws_per_frame < 120 : draws_per_frame < 60;
+        }
+        if (user && user < 60 && !keep_for_movies && movie_only && Gow3MoviePlaying()) {
+            user = 60;
+        }
         u32 limit = user;
         if (fixed_limit) {
             const u32 base = EmulatorSettings.GetFrameLimit();
