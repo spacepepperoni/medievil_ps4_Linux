@@ -107,21 +107,26 @@ def read_index(path):
     return entries
 
 
+def read_entry(pak, entry):
+    """The data of one index entry (stored or zlib-compressed)."""
+    offset, size, compression, blocks = entry
+    with open(pak, 'rb') as f:
+        if not compression:
+            f.seek(offset + 53)  # the entry header in front of the data
+            return f.read(size)
+        data = bytearray()
+        for start, end in blocks:
+            f.seek(offset + start)
+            data += zlib.decompress(f.read(end - start))
+        return bytes(data)
+
+
 def read_file(game, name):
     """A file of the game's own paks (stored or zlib-compressed)."""
     for pak in sorted(paks_dir(game).glob('pakchunk*-ps4.pak')):
         entries = read_index(pak)
         if name in entries:
-            offset, size, compression, blocks = entries[name]
-            with open(pak, 'rb') as f:
-                if not compression:
-                    f.seek(offset + 53)  # the entry header in front of the data
-                    return f.read(size)
-                data = bytearray()
-                for start, end in blocks:
-                    f.seek(offset + start)
-                    data += zlib.decompress(f.read(end - start))
-                return bytes(data)
+            return read_entry(pak, entries[name])
     raise FileNotFoundError(name)
 
 
@@ -348,7 +353,7 @@ ANTI_ALIASING = {'taa': None, 'fxaa': '2', 'off': '0'}
 
 
 def apply(game, resolution='native', quality='console', fps=60, debug_menu=False, infinite_ammo=False,
-          upscale='off', aa='taa'):
+          upscale='off', aa='taa', prompts='playstation', cache_dir=None):
     """Writes or removes the override pak. Returns a short description of the active state."""
     pak = paks_dir(game) / PAK_NAME
     # Earlier builds wrote the `_P` spelling: on Linux it stayed behind, unread.
@@ -373,7 +378,14 @@ def apply(game, resolution='native', quality='console', fps=60, debug_menu=False
     if aa_quality is not None:
         values['r.PostProcessAAQuality'] = aa_quality
     engine = frame_rate_range(fps) if fps > 60 else {}
-    if not values and not engine and not debug_menu and not infinite_ammo:
+    # Linux fork: Xbox or Steam Deck button pictures (button_prompts.py).
+    import button_prompts
+    try:
+        pictures = button_prompts.prompt_files(game, prompts, cache_dir)
+    except (OSError, ValueError, ImportError) as error:
+        print(f'Button pictures: PlayStation ({error})', flush=True)
+        pictures = {}
+    if not values and not engine and not debug_menu and not infinite_ammo and not pictures:
         pak.unlink(missing_ok=True)
         return 'native 1080p, console quality, 60 FPS'
     files = {CONFIG: set_values(read_file(game, CONFIG), values, engine)}
@@ -394,8 +406,9 @@ def apply(game, resolution='native', quality='console', fps=60, debug_menu=False
         except (ValueError, FileNotFoundError) as error:
             print(f'Unlimited ammo: not available for this game build ({error})', flush=True)
             infinite_ammo = False
+    files.update(pictures)
     write_pak(pak, files)
-    return (f'{resolution if percentage or output else "native 1080p"}'
+    return (f'{"" if not pictures else prompts + " button pictures, "}'f'{resolution if percentage or output else "native 1080p"}'
             f'{f" (r.ScreenPercentage={percentage})" if percentage else ""}'
             f'{f" (native output {output})" if output else ""}'
             f'{f", temporal upscaling {upscale} ({scale}%)" if scale else ""}'

@@ -268,6 +268,12 @@ def deck_updates(settings, ini_path):
             settings['deck_fps'] = '30'
             if settings.get('deck_mode'):
                 graphics_options.write_keys(ini_path, {'fps_limit': '30'})
+    if not settings.get('deck_prompts'):
+        # Steam Deck button pictures (button_prompts.py) for players in Steam Deck mode who kept
+        # the PlayStation names.
+        settings['deck_prompts'] = changed = True
+        if settings.get('deck_mode') and settings.get('pad_style', 'playstation') == 'playstation':
+            settings['pad_style'] = 'steamdeck'
     if not settings.get('deck_720p'):
         settings['deck_720p'] = changed = True
         if settings.get('deck_mode') and \
@@ -314,6 +320,12 @@ def deck_switch(launcher, ini_flags):
     """The checkbox changed: apply the Deck values (keeping the player's), or put those back."""
     on = launcher.var('deck_mode', 'app').get()
     if on:
+        # The Deck's button pictures, unless the player chose Xbox ones.
+        if launcher.app.get('pad_style', 'playstation') == 'playstation':
+            launcher.app['pad_style'] = 'steamdeck'
+            if hasattr(launcher, 'pad_style'):
+                launcher.pad_style.set('steamdeck')
+                launcher.relabel_pad_controls()
         launcher.app['deck_saved'] = {key: get_var(launcher, key, ini_flags) for key in DECK_LOCKED}
         for key, value in deck_values(launcher).items():
             set_var(launcher, key, value, ini_flags)

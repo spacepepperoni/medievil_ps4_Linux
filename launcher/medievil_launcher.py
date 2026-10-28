@@ -201,6 +201,12 @@ PAD_STYLES = {
              'leftstick': 'LS (left stick click)', 'rightstick': 'RS (right stick click)', 'start': 'Menu',
              'back': 'View', 'touchpad': 'Touchpad click', 'guide': 'Xbox button', 'dpup': 'D-pad up',
              'dpdown': 'D-pad down', 'dpleft': 'D-pad left', 'dpright': 'D-pad right', 'misc1': 'Share'},
+    # Linux fork: the Steam Deck's names (its shoulder buttons and stick clicks are L1 R1 L3 R3).
+    'steamdeck': {'a': 'A', 'b': 'B', 'x': 'X', 'y': 'Y', 'leftshoulder': 'L1', 'rightshoulder': 'R1',
+                  'leftstick': 'L3', 'rightstick': 'R3', 'start': 'Menu', 'back': 'View',
+                  'touchpad': 'Trackpad click', 'guide': 'Steam button', 'dpup': 'D-pad up',
+                  'dpdown': 'D-pad down', 'dpleft': 'D-pad left', 'dpright': 'D-pad right',
+                  'misc1': 'Quick access button'},
 }
 
 
@@ -386,6 +392,8 @@ def game_environment(s):
         if value := control_map(s.get('controls', {}), kind):
             env[name] = value
     env.setdefault('GOW3_FPS_LOG', '1')  # FPS and worst frame every 5 s in the log (diagnostics)
+    if not WINDOWS:  # Linux fork: Xbox or Steam Deck pictures in the game's prompts
+        env['GOW3_BUTTON_PROMPTS'] = s.get('pad_style') or 'playstation'
     env.setdefault('GOW3_FRAME_STATS', '1')  # draws, compiles and stalls every 5 s (diagnostics)
     # F12 in the game saves a PNG screenshot of the game's picture.
     env.setdefault('GOW3_SCREENSHOT_DIR', str(screenshots_dir(s)))
@@ -1350,10 +1358,12 @@ class Launcher:
         style = self.app.get('pad_style') if self.app.get('pad_style') in PAD_STYLES else 'playstation'
         self.pad_style = tk.StringVar(value=style)
         names = ttk.Frame(f)
-        for value, label in (('playstation', 'PlayStation'), ('xbox', 'Xbox')):
+        for value, label in (('playstation', 'PlayStation'), ('xbox', 'Xbox'), ('steamdeck', 'Steam Deck')):
             ttk.Radiobutton(names, text=label, value=value, variable=self.pad_style,
                             command=self.relabel_pad_controls).pack(side='left', padx=(0, 14))
-        self.row(f, _('Gamepad names'), names)
+        # Linux fork: the same choice draws the game's own button prompts (scripts/button_prompts.py).
+        self.row(f, _('Button pictures'), names,
+                 _('The buttons named here and shown in the game\'s prompts and HUD (applied at start).'))
         self.row(f, _('Stick range'), self.choice(f, 'stick_range', 'app', STICK_RANGES),
                  _('How far the sticks must tilt for a full push. Lower it if your character moves slowly '
                    'with the stick pushed all the way (some hall-effect sticks never reach the edge).'))
