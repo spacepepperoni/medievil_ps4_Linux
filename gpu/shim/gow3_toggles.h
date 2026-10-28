@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <mutex>
 #ifdef _WIN32
 // gow3 (Windows): no signals. The loader's exception handler resumes the faulting thread
 // in gow3_longjmp (src/compat_win.c: no unwinding through the faulting frames).
@@ -134,6 +135,29 @@ struct WaitSite {
     explicit WaitSite(int site) : previous{wait_site} { wait_site = site; }
     ~WaitSite() { wait_site = previous; }
 };
+/// Linux fork: GPU-written buffer data copied back for the CPU (a CPU access to a GPU-modified
+/// page): each one waits for the GPU to finish all submitted work. Busiest 64 KiB blocks kept.
+inline std::atomic<std::uint64_t> buffer_downloads{0}, buffer_download_bytes{0}, buffer_download_wait_ns{0};
+struct DownloadBlock { std::uint64_t block, count; };
+/// A spin lock: downloads may run inside a fault handler.
+struct SpinLock {
+    std::atomic_flag flag = ATOMIC_FLAG_INIT;
+    void lock() { while (flag.test_and_set(std::memory_order_acquire)) {} }
+    void unlock() { flag.clear(std::memory_order_release); }
+};
+inline SpinLock download_blocks_mutex;
+inline DownloadBlock download_blocks[8]{};
+inline void NoteDownloadBlock(std::uint64_t address) {
+    std::lock_guard lock{download_blocks_mutex};
+    const std::uint64_t block = address >> 16;
+    DownloadBlock* least = &download_blocks[0];
+    for (auto& b : download_blocks) {
+        if (b.block == block && b.count) { ++b.count; return; }
+        if (b.count < least->count) least = &b;
+    }
+    if (!least->count) *least = {block, 1};
+    else ++least->count; // stays approximate: the least busy slot absorbs new blocks
+}
 struct WaitTimer {
     std::atomic<std::uint64_t>& total;
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();

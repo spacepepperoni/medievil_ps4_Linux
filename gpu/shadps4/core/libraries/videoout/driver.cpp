@@ -572,6 +572,27 @@ void VideoOutDriver::Flip(const Request& req) {
                 if (!sites.empty()) {
                     std::printf("Host copy waits: %s\n", sites.c_str());
                 }
+                const u64 downloads = Gow3Stats::buffer_downloads.exchange(0);
+                const u64 download_bytes = Gow3Stats::buffer_download_bytes.exchange(0);
+                const u64 download_ns = Gow3Stats::buffer_download_wait_ns.exchange(0);
+                if (downloads && frames) {
+                    std::string blocks;
+                    {
+                        std::lock_guard lock{Gow3Stats::download_blocks_mutex};
+                        std::sort(std::begin(Gow3Stats::download_blocks), std::end(Gow3Stats::download_blocks),
+                                  [](const auto& a, const auto& b) { return a.count > b.count; });
+                        for (auto& b : Gow3Stats::download_blocks) {
+                            if (b.count) {
+                                blocks += fmt::format(" {:#x}:{}", b.block << 16, b.count);
+                            }
+                            b = {};
+                        }
+                    }
+                    std::printf("Buffer downloads: %.1f/frame, %.0f KiB/frame, %.2f ms/frame waiting for the GPU; "
+                                "busiest 64 KiB blocks:%s\n",
+                                double(downloads) / frames, download_bytes / 1024.0 / frames,
+                                download_ns / 1e6 / frames, blocks.c_str());
+                }
             }
             presenter->GetRasterizer().GetPipelineCache().ReportCompilerStats();
             Vulkan::WaitDiagnostics::Report();

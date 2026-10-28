@@ -210,7 +210,13 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
         copy.dstOffset += download.offset;
     }
     runtime.CopyBuffer(arena, download.buffer, copies);
-    scheduler.Finish();
+    Gow3Stats::buffer_downloads.fetch_add(1, std::memory_order_relaxed);
+    Gow3Stats::buffer_download_bytes.fetch_add(total_size_bytes, std::memory_order_relaxed);
+    Gow3Stats::NoteDownloadBlock(device_addr);
+    {
+        Gow3Stats::WaitTimer timer{Gow3Stats::buffer_download_wait_ns};
+        scheduler.Finish();
+    }
 
     download.buffer->Invalidate(download.offset, download.size);
     for (const auto& copy : copies) {
