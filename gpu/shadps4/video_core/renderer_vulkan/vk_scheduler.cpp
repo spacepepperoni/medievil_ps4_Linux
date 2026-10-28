@@ -532,7 +532,8 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         // Until the next submission's first timestamp: mostly the GPU waiting for it.
         profiler->Mark(0x5B317ull, [] { return std::string{"(between submissions: GPU idle)"}; });
     }
-    if (Gow3Stats::host_read_barrier.load(std::memory_order_relaxed)) {
+    if (Gow3Stats::host_read_barrier.load(std::memory_order_relaxed) &&
+        Gow3Stats::host_read_pending.exchange(false, std::memory_order_relaxed)) {
         // Linux fork: the CPU reads GPU-written buffers from mapped memory once this
         // submission is done (BufferCache::DownloadMapped).
         Record([](vk::CommandBuffer cmdbuf) {

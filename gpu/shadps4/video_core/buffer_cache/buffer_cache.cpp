@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <bit>
 #include <cstdlib>
+#include <cstring>
 #include <magic_enum/magic_enum.hpp>
 #include "gow3_copy.h"
 #include "gow3_toggles.h"
@@ -198,7 +199,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             std::max<VAddr>(Common::AlignDown(device_addr, WindowSize), arena->cpu_addr);
         const VAddr window_end = std::min<VAddr>(
             std::max<VAddr>(window_start + WindowSize, device_addr + size), arena_end);
-        DownloadMemory(arena, window_start, window_end - window_start);
+        DownloadMemory(arena, window_start, window_end - window_start, is_write);
         if (is_write) {
             memory_tracker->MarkRegionAsCpuModified(device_addr, size);
         }
@@ -210,7 +211,10 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
     }
 }
 
-void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size) {
+void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size, bool for_write) {
+    if (has_pending_merges.load(std::memory_order_acquire)) {
+        RetirePendingMerges(false);
+    }
     boost::container::small_vector<std::pair<VAddr, VAddr>, 4> ranges;
     memory_tracker->ForEachDownloadRange<false>(device_addr, size, [&](u64 address, u64 size) {
         gpu_modified_ranges.ForEachInRange(address, size, [&](VAddr start, VAddr end) {
@@ -223,7 +227,7 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
     }
     Gow3Stats::buffer_downloads.fetch_add(1, std::memory_order_relaxed);
     Gow3Stats::NoteDownloadBlock(device_addr);
-    if (DownloadMapped(ranges)) {
+    if (DownloadMapped(ranges, for_write)) {
         memory_tracker->UnmarkRegionAsGpuModified(device_addr, size);
         return;
     }
@@ -271,6 +275,7 @@ void BufferCache::NoteGpuWrite(VAddr device_addr, u64 size) {
         return;
     }
     const u64 tick = scheduler.OwnsRecording() ? scheduler.CurrentTick() : UnknownTick;
+    Gow3Stats::host_read_pending.store(true, std::memory_order_relaxed);
     const u64 first = device_addr >> WriteGranuleBits;
     const u64 last = (device_addr + size - 1) >> WriteGranuleBits;
     std::lock_guard lock{write_ticks_lock};
@@ -283,7 +288,7 @@ void BufferCache::NoteGpuWrite(VAddr device_addr, u64 size) {
 // the submission that last wrote them (usually done already) instead of copying them behind all
 // submitted work. In MediEvil's heavy scenes on the Steam Deck one small block written by the
 // CPU about every third frame cost a whole GPU frame (~35 ms) each time: 18-19 FPS.
-bool BufferCache::DownloadMapped(std::span<const std::pair<VAddr, VAddr>> ranges) {
+bool BufferCache::DownloadMapped(std::span<const std::pair<VAddr, VAddr>> ranges, bool for_write) {
     if (!arena_host_mapped) {
         return false;
     }
@@ -320,6 +325,23 @@ bool BufferCache::DownloadMapped(std::span<const std::pair<VAddr, VAddr>> ranges
         }
     }
     if (!scheduler.IsFree(tick)) {
+        static const bool defer = [] {
+            const char* env = std::getenv("GOW3_DEFER_DOWNLOADS");
+            return !(env && env[0] == '0');
+        }();
+        // Guest pages are readable here unless readbacks are Precise (GPU data read-protected).
+        // Only for a CPU write: a CPU read needs the data now.
+        if (defer && for_write && EmulatorSettings.GetReadbacksMode() != GpuReadbacksMode::Precise) {
+            std::lock_guard lock{pending_lock};
+            for (const auto& [start, end] : ranges) {
+                PendingMerge merge{start, end, tick, std::vector<u8>(end - start)};
+                std::memcpy(merge.snapshot.data(), std::bit_cast<const u8*>(start), end - start);
+                pending_merges.push_back(std::move(merge));
+            }
+            has_pending_merges.store(true, std::memory_order_release);
+            Gow3Stats::buffer_downloads_deferred.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
         Gow3Stats::WaitTimer timer{Gow3Stats::buffer_download_wait_ns};
         scheduler.Wait(tick);
     }
@@ -339,6 +361,78 @@ bool BufferCache::DownloadMapped(std::span<const std::pair<VAddr, VAddr>> ranges
         });
     }
     return true;
+}
+
+const u8* BufferCache::MappedArena(VAddr addr, u64 size) const {
+    const u8* found = nullptr;
+    resident_ranges.ForEachInRange(addr >> block_shift, ((addr + size - 1) >> block_shift) + 1,
+                                   [&](const Backing& backing) {
+        if (backing.mapped && (backing.start << block_shift) <= addr &&
+            addr + size <= (backing.end << block_shift)) {
+            found = backing.mapped + backing.offset + (addr - (backing.start << block_shift));
+        }
+    });
+    return found;
+}
+
+bool BufferCache::PendingOverlaps(VAddr addr, u64 size) {
+    if (!has_pending_merges.load(std::memory_order_acquire)) {
+        return false;
+    }
+    std::lock_guard lock{pending_lock};
+    for (const auto& merge : pending_merges) {
+        if (merge.start < addr + size && addr < merge.end) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The GPU bytes of a range whose submission is done go into guest memory, except where the
+// CPU wrote since (those bytes are uploaded to the arena instead).
+void BufferCache::MergePending(PendingMerge& merge) {
+    const u64 size = merge.end - merge.start;
+    const u8* gpu = MappedArena(merge.start, size);
+    if (!gpu) {
+        return; // cannot happen: DownloadMapped checked the mapping
+    }
+    const u8* guest = std::bit_cast<const u8*>(merge.start);
+    u64 i = 0;
+    while (i < size) {
+        const bool cpu_changed = guest[i] != merge.snapshot[i];
+        u64 j = i + 1;
+        while (j < size && (guest[j] != merge.snapshot[j]) == cpu_changed) {
+            ++j;
+        }
+        if (cpu_changed) {
+            memory_tracker->MarkRegionAsCpuModified(merge.start + i, j - i);
+        } else {
+            memory->TryWriteBacking(std::bit_cast<u8*>(merge.start + i), gpu + i, j - i);
+        }
+        i = j;
+    }
+    Gow3Stats::buffer_download_bytes.fetch_add(size, std::memory_order_relaxed);
+}
+
+void BufferCache::RetirePendingMerges(bool wait) {
+    std::vector<PendingMerge> ready;
+    {
+        std::lock_guard lock{pending_lock};
+        std::erase_if(pending_merges, [&](PendingMerge& merge) {
+            if (!wait && !scheduler.IsFree(merge.tick)) {
+                return false;
+            }
+            ready.push_back(std::move(merge));
+            return true;
+        });
+        has_pending_merges.store(!pending_merges.empty(), std::memory_order_release);
+    }
+    for (auto& merge : ready) {
+        if (wait && !scheduler.IsFree(merge.tick)) {
+            scheduler.Wait(merge.tick);
+        }
+        MergePending(merge);
+    }
 }
 
 namespace {
@@ -426,6 +520,9 @@ void PrintBufferStats() {
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
                                                         bool is_written, bool is_texel_buffer) {
     texture_cache.ResolveReadbacks(device_addr, size, true, ReadbackSource::BufferObtain);
+    if (has_pending_merges.load(std::memory_order_acquire)) {
+        RetirePendingMerges(false);
+    }
     const bool stats = BufferStatsEnabled();
     if (stats) {
         PrintBufferStats();
@@ -517,7 +614,7 @@ bool BufferCache::IsRegionCpuModified(VAddr addr, size_t size) {
 }
 
 bool BufferCache::IsRegionGpuModified(VAddr addr, size_t size) {
-    return memory_tracker->IsRegionGpuModified(addr, size);
+    return memory_tracker->IsRegionGpuModified(addr, size) || PendingOverlaps(addr, size);
 }
 
 void BufferCache::ProcessFaultBuffer() {
@@ -658,6 +755,35 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
     memory_tracker->ForEachUploadRange(
         device_addr, size, is_written,
         [&](u64 addr, u64 size) {
+            // Linux fork: ranges with GPU data still to merge stay out (PendingMerge).
+            if (has_pending_merges.load(std::memory_order_acquire)) {
+                boost::container::small_vector<std::pair<VAddr, VAddr>, 4> excluded;
+                {
+                    std::lock_guard lock{pending_lock};
+                    for (const auto& merge : pending_merges) {
+                        if (merge.start < addr + size && addr < merge.end) {
+                            excluded.emplace_back(std::max<VAddr>(merge.start, addr),
+                                                  std::min<VAddr>(merge.end, addr + size));
+                        }
+                    }
+                }
+                if (!excluded.empty()) {
+                    std::ranges::sort(excluded);
+                    VAddr cursor = addr;
+                    const auto emit = [&](VAddr from, VAddr to) {
+                        if (from < to) {
+                            copies.emplace_back(total_size_bytes, from, to - from);
+                            total_size_bytes += to - from;
+                        }
+                    };
+                    for (const auto& [from, to] : excluded) {
+                        emit(cursor, from);
+                        cursor = std::max(cursor, to);
+                    }
+                    emit(cursor, addr + size);
+                    return;
+                }
+            }
             copies.emplace_back(total_size_bytes, addr, size);
             total_size_bytes += size;
         },
