@@ -541,6 +541,26 @@ void VideoOutDriver::Flip(const Request& req) {
                             sorted[std::min(sorted.size() - 1, sorted.size() * 99 / 100)], spikes);
             }
             intervals.clear();
+            {
+                std::scoped_lock lock{guest_flip_mutex};
+                auto& game = guest_flip_intervals;
+                if (game.size() > 2) {
+                    std::vector<double> sorted = game;
+                    std::sort(sorted.begin(), sorted.end());
+                    double sum = 0, sq = 0;
+                    for (const double ms : game) {
+                        sum += ms;
+                        sq += ms * ms;
+                    }
+                    const double mean = sum / game.size();
+                    std::printf("Game pacing: median %.2f ms, stddev %.2f ms, min %.2f ms, p99 %.2f ms "
+                                "(the game's own flip calls)\n",
+                                sorted[sorted.size() / 2],
+                                std::sqrt(std::max(0.0, sq / game.size() - mean * mean)), sorted.front(),
+                                sorted[std::min(sorted.size() - 1, sorted.size() * 99 / 100)]);
+                }
+                game.clear();
+            }
             window_start = now;
             frames = 0;
             worst_ms = 0;
@@ -600,6 +620,22 @@ void VideoOutDriver::DrawLastFrame() {
             presenter->Present(frame, true);
         }
     }, true);
+}
+
+// Linux fork: when the game itself submits its flips (sceVideoOutSubmitFlip), for "Game pacing"
+// beside "Frame pacing" (the presents): a camera pan judders when the game takes its frames at
+// uneven moments even though they are shown evenly.
+static std::mutex guest_flip_mutex;
+static std::vector<double> guest_flip_intervals;
+void NoteGuestFlip() {
+    using Clock = std::chrono::steady_clock;
+    static Clock::time_point last;
+    const auto now = Clock::now();
+    std::scoped_lock lock{guest_flip_mutex};
+    if (last.time_since_epoch().count() && guest_flip_intervals.size() < 4096) {
+        guest_flip_intervals.push_back(std::chrono::duration<double, std::milli>(now - last).count());
+    }
+    last = now;
 }
 
 bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
