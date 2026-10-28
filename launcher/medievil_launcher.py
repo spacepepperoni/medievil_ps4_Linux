@@ -400,6 +400,8 @@ def game_environment(s):
         # pan jumped ahead several frames, the spider popped in instead of fading); fixed, every
         # frame advances one step and a heavy moment runs a little slower instead.
         env['GOW3_FIXED_FRAME_RATE'] = str(s.get('deck_fps') or '30')
+    if not WINDOWS:  # Linux fork: the surround channels in a stereo mix
+        env['GOW3_AUDIO_SURROUND'] = medievil_linux.STEREO_SURROUND_LEVELS.get(s.get('stereo_surround') or 'off', '0')
     if not WINDOWS and s.get('record_inputs'):  # Linux fork: frame-stamped input recording
         env['GOW3_PAD_RECORD_AUTO'] = '1'
         env['GOW3_FIXED_FRAME_RATE'] = '30'
