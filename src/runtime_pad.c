@@ -220,6 +220,13 @@ static uint32_t gamepad_buttons(void) {
             if (SDL_GetGamepadButton(gamepads[p],(SDL_GamepadButton)pad_map.entries[i].source)) buttons|=pad_map.entries[i].ps;
     return buttons;
 }
+/* Linux fork: both back grips held (Steam Deck L4+R4, SDL's paddles), the recording toggle. */
+static int back_grips_down(void) {
+    for (int p=0;p<gamepad_count;++p)
+        if (SDL_GetGamepadButton(gamepads[p],SDL_GAMEPAD_BUTTON_LEFT_PADDLE1) &&
+            SDL_GetGamepadButton(gamepads[p],SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1)) return 1;
+    return 0;
+}
 /* GOW3_STICK_RANGE=<percent> (launcher: Stick range): that much tilt counts as a full push, for
  * sticks that never reach the edge (some hall-effect pads, issue #36). Default 100. */
 static int16_t stick_range(int16_t v) {
@@ -354,23 +361,44 @@ typedef struct { uint32_t ms, buttons; uint8_t axes[4], l2, r2; } PadSample;
 static FILE *record_file;
 static uint64_t record_start;
 static PadSample record_last;
+/* Linux fork: F9 or the Steam Deck's back grips L4+R4 together start and stop a recording, also
+ * without GOW3_PAD_RECORD: then each one goes to <user dir>/pad-recordings/route-<date>-<time>.txt,
+ * for the pyro test bench to replay. Games started from Steam see Steam's virtual controller,
+ * which hides the grips: bind L4 or R4 to the keyboard key F9 in the game's controller layout. */
 static void record_sample(const PadData *d) {
-    static const char *path; static int checked, f9_was_down;
-    if (!checked) { path=getenv("GOW3_PAD_RECORD"); checked=1; }
-    if (!path || !*path || !sdl_ready) return;
+    static const char *env_path; static int checked, f9_was_down, sticks_were_down;
+    static char path[4096];
+    if (!checked) { env_path=getenv("GOW3_PAD_RECORD"); checked=1; }
+    if (!sdl_ready) return;
     const bool *k=SDL_GetKeyboardState(NULL);
     const int f9=k && k[SDL_SCANCODE_F9];
-    if (f9 && !f9_was_down) {
+    const int sticks=back_grips_down();
+    if ((f9 && !f9_was_down) || (sticks && !sticks_were_down)) {
         if (record_file) {
             fclose(record_file); record_file=NULL;
             printf("Runtime: pad recording stopped (%s)\n",path);
-        } else if ((record_file=fopen(path,"w"))) {
-            record_start=now_us();
-            memset(&record_last,0xff,sizeof(record_last));
-            printf("Runtime: pad recording started (%s, F9 stops)\n",path);
+        } else {
+            if (env_path && *env_path) snprintf(path,sizeof(path),"%s",env_path);
+            else {
+                char dir[4096]; time_t now=time(NULL); struct tm tm;
+                snprintf(dir,sizeof(dir),"%s/pad-recordings",runtime_file_user_dir());
+#ifdef _WIN32
+                localtime_s(&tm,&now); mkdir(dir);
+#else
+                localtime_r(&now,&tm); mkdir(dir,0755);
+#endif
+                snprintf(path,sizeof(path),"%s/route-%04d%02d%02d-%02d%02d%02d.txt",dir,tm.tm_year+1900,
+                         tm.tm_mon+1,tm.tm_mday,tm.tm_hour,tm.tm_min,tm.tm_sec);
+            }
+            if ((record_file=fopen(path,"w"))) {
+                record_start=now_us();
+                memset(&record_last,0xff,sizeof(record_last));
+                printf("Runtime: pad recording started (%s, F9 or L4+R4 stops)\n",path);
+            }
         }
     }
     f9_was_down=f9;
+    sticks_were_down=sticks;
     if (!record_file) return;
     PadSample s={(uint32_t)((now_us()-record_start)/1000),d->buttons,
                  {d->left_x,d->left_y,d->right_x,d->right_y},d->l2,d->r2};
