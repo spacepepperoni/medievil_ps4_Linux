@@ -238,7 +238,9 @@ def add_to_steam(launcher, launcher_file, config_dir, port_dir, _, app_name):
 # Those settings are locked while it is on; turning it off restores the player's own values.
 # On SteamOS it is on until the player turns it off.
 
-DECK_FPS = [('60', ('60',)), ('30', ('30 (longer battery life)',))]
+# 30 by default: the Deck's CPU translates the PS4's GPU commands and does not hold 60 in the
+# levels (upstream #16, #21); a steady 30 also gives longer battery life. 60 can be chosen.
+DECK_FPS = [('30', ('30 (recommended)',)), ('60', ('60',))]
 # medievil.ini values (the game and the in-game menu read the same file).
 DECK_SETTINGS = {
     'display_mode': 'fullscreen',         # gamescope (Game Mode) scales the window to the screen
@@ -247,7 +249,22 @@ DECK_SETTINGS = {
     'vsync': '1',
 }
 DECK_LOCKED = (*DECK_SETTINGS, 'fps_limit')
-APP_DEFAULTS = {'deck_mode': False, 'deck_fps': '60'}
+APP_DEFAULTS = {'deck_mode': False, 'deck_fps': '30'}
+
+
+def deck_30fps(settings, ini_path):
+    """Steam Deck mode's default became 30 FPS: settings saved by an older launcher switch to 30
+    once (settings.json and, when the mode is on, fps_limit in medievil.ini), also for a start from
+    Steam that never opens the launcher. Returns True when the settings changed (to be saved)."""
+    if settings.get('deck_30fps'):
+        return False
+    settings['deck_30fps'] = True
+    if settings.get('deck_fps', '30') != '30':
+        settings['deck_fps'] = '30'
+        if settings.get('deck_mode'):
+            import graphics_options
+            graphics_options.write_keys(ini_path, {'fps_limit': '30'})
+    return True
 
 
 def steam_os():
