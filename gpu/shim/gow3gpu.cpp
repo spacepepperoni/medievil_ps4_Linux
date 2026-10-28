@@ -328,18 +328,6 @@ u32 ConsumeWithOverlaysScreenshotRequests() { return 0; }
 ScreenshotRequests ConsumeScreenshotRequests() { return {}; }
 } // namespace VideoCore
 
-// Linux fork: when the video decoder last finished a picture (steady clock, ns).
-static std::atomic<int64_t> movie_frame_ns{0};
-extern "C" void gow3gpu_movie_frame(void) {
-    movie_frame_ns.store(std::chrono::steady_clock::now().time_since_epoch().count(),
-                         std::memory_order_relaxed);
-}
-/// A movie is playing: a picture was decoded within the last quarter second.
-bool Gow3MoviePlaying() {
-    const int64_t last = movie_frame_ns.load(std::memory_order_relaxed);
-    return last && std::chrono::steady_clock::now().time_since_epoch().count() - last < 250000000;
-}
-
 extern "C" int gow3gpu_overlay_captures_input(void) {
     return Gow3Overlay::CapturesInput() ? 1 : 0;
 }

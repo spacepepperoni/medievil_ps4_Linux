@@ -7,7 +7,6 @@
 #include <string.h>
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
-#include "gpu/gow3gpu.h"
 
 #define ERR_API_FAIL ((int32_t)0x80C10000)
 #define ERR_STRUCT_SIZE ((int32_t)0x80C10002)
@@ -126,7 +125,6 @@ static int32_t picture(Decoder *d, FrameBuffer *buffer, PictureInfo *info) {
     info->codec.avc.crop_right=pitch-width;
     info->codec.avc.crop_bottom=rows-height;
     ++pictures_decoded;
-    gow3gpu_movie_frame(); /* Linux fork: movies play at 60 FPS under a lower frame limit */
     return 0;
 }
 static int32_t receive(Decoder *d, FrameBuffer *buffer, PictureInfo *info) {
