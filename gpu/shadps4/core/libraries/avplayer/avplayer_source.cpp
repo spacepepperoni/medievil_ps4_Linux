@@ -25,6 +25,8 @@ extern "C" {
 
 extern "C" int runtime_file_translate(const char* guest, char* out, size_t size);
 
+extern "C" void gow3gpu_movie_frame(void); // Linux fork: gow3gpu.cpp
+
 namespace Libraries::AvPlayer {
 
 static AvPlayerStreamType CodecTypeToStreamType(AVMediaType codec_type) {
@@ -390,6 +392,10 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
     video_info = frame->info;
 
     m_current_video_frame = std::move(frame);
+    // Linux fork: a movie is playing (its frames come here, not through sceVideodec): a frame
+    // limit below 60 steps aside meanwhile, so the 30 FPS movies are sampled twice per frame
+    // instead of beating against a 30 FPS game (gow3gpu.cpp, videoout driver).
+    gow3gpu_movie_frame();
     return true;
 }
 
