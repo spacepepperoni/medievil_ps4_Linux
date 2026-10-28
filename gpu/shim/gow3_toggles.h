@@ -137,7 +137,11 @@ struct WaitSite {
 };
 /// Linux fork: GPU-written buffer data copied back for the CPU (a CPU access to a GPU-modified
 /// page): each one waits for the GPU to finish all submitted work. Busiest 64 KiB blocks kept.
-inline std::atomic<std::uint64_t> buffer_downloads{0}, buffer_download_bytes{0}, buffer_download_wait_ns{0};
+inline std::atomic<std::uint64_t> buffer_downloads{0}, buffer_download_bytes{0}, buffer_download_wait_ns{0},
+    buffer_downloads_mapped{0};
+/// Linux fork: the CPU reads mapped GPU memory: each submission ends with a barrier making its
+/// writes visible to the host (BufferCache::DownloadMapped).
+inline std::atomic<bool> host_read_barrier{false};
 struct DownloadBlock { std::uint64_t block, count; };
 /// A spin lock: downloads may run inside a fault handler.
 struct SpinLock {

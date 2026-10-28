@@ -93,6 +93,35 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
         FindMemoryType(instance.GetMemoryProperties(), vk::MemoryPropertyFlagBits::eDeviceLocal,
                        reqs.memoryTypeBits)
             .value();
+    // Linux fork: device-local memory the CPU can map (APUs such as the Steam Deck's offer it
+    // in the same heap): GPU-written data is then read by the CPU directly (DownloadMapped).
+    // GOW3_ARENA_MAPPED=0: plain device-local memory and GPU copies as before.
+    {
+        const char* env = std::getenv("GOW3_ARENA_MAPPED");
+        if (!(env && env[0] == '0')) {
+            constexpr auto wanted = vk::MemoryPropertyFlagBits::eDeviceLocal |
+                                    vk::MemoryPropertyFlagBits::eHostVisible |
+                                    vk::MemoryPropertyFlagBits::eHostCoherent;
+            const auto& props = instance.GetMemoryProperties();
+            const u32 local_heap = props.memoryTypes[arena_memory_type_index].heapIndex;
+            for (u32 i = 0; i < props.memoryTypeCount; ++i) {
+                const auto flags = props.memoryTypes[i].propertyFlags;
+                // Same heap as the plain device-local type: on a discrete GPU the mappable
+                // window (BAR) is small, and there it is not used.
+                if ((reqs.memoryTypeBits & (1u << i)) && (flags & wanted) == wanted &&
+                    !(flags & vk::MemoryPropertyFlagBits::eDeviceUncachedAMD) &&
+                    props.memoryTypes[i].heapIndex == local_heap &&
+                    props.memoryHeaps[local_heap].size >= (u64{1} << 30)) {
+                    arena_memory_type_index = i;
+                    arena_host_mapped = true;
+                    Gow3Stats::host_read_barrier.store(true, std::memory_order_relaxed);
+                    break;
+                }
+            }
+        }
+        std::printf("GPU: buffer arenas in %s memory (type %u)\n",
+                    arena_host_mapped ? "CPU-mapped device" : "device", arena_memory_type_index);
+    }
 
     const u64 bda_pagetable_size =
         (blocks_per_arena_page * num_arena_pages) * sizeof(vk::DeviceAddress);
@@ -182,37 +211,43 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
 }
 
 void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size) {
+    boost::container::small_vector<std::pair<VAddr, VAddr>, 4> ranges;
+    memory_tracker->ForEachDownloadRange<false>(device_addr, size, [&](u64 address, u64 size) {
+        gpu_modified_ranges.ForEachInRange(address, size, [&](VAddr start, VAddr end) {
+            ranges.emplace_back(start, end);
+        });
+        gpu_modified_ranges.Subtract(address, size);
+    });
+    if (ranges.empty()) {
+        return;
+    }
+    Gow3Stats::buffer_downloads.fetch_add(1, std::memory_order_relaxed);
+    Gow3Stats::NoteDownloadBlock(device_addr);
+    if (DownloadMapped(ranges)) {
+        memory_tracker->UnmarkRegionAsGpuModified(device_addr, size);
+        return;
+    }
     boost::container::small_vector<vk::BufferCopy, 1> copies;
     u64 total_size_bytes = 0;
     const VAddr arena_base = arena->cpu_addr;
-    memory_tracker->ForEachDownloadRange<false>(device_addr, size, [&](u64 address, u64 size) {
-        const auto add_download = [&](VAddr start, VAddr end) {
-            const u64 new_offset = start - arena_base;
-            const u64 new_size = end - start;
-            copies.push_back(vk::BufferCopy{
-                .srcOffset = new_offset,
-                .dstOffset = total_size_bytes,
-                .size = new_size,
-            });
-            // Align up to avoid cache conflicts
-            constexpr u64 align = 64ULL;
-            constexpr u64 mask = ~(align - 1ULL);
-            total_size_bytes += (new_size + align - 1) & mask;
-        };
-        gpu_modified_ranges.ForEachInRange(address, size, add_download);
-        gpu_modified_ranges.Subtract(address, size);
-    });
-    if (total_size_bytes == 0) {
-        return;
+    for (const auto& [start, end] : ranges) {
+        const u64 new_size = end - start;
+        copies.push_back(vk::BufferCopy{
+            .srcOffset = start - arena_base,
+            .dstOffset = total_size_bytes,
+            .size = new_size,
+        });
+        // Align up to avoid cache conflicts
+        constexpr u64 align = 64ULL;
+        constexpr u64 mask = ~(align - 1ULL);
+        total_size_bytes += (new_size + align - 1) & mask;
     }
     const auto download = staging_pool.Request(total_size_bytes, VideoCore::MemoryType::HostCached);
     for (auto& copy : copies) {
         copy.dstOffset += download.offset;
     }
     runtime.CopyBuffer(arena, download.buffer, copies);
-    Gow3Stats::buffer_downloads.fetch_add(1, std::memory_order_relaxed);
     Gow3Stats::buffer_download_bytes.fetch_add(total_size_bytes, std::memory_order_relaxed);
-    Gow3Stats::NoteDownloadBlock(device_addr);
     {
         Gow3Stats::WaitTimer timer{Gow3Stats::buffer_download_wait_ns};
         scheduler.Finish();
@@ -225,6 +260,85 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
                                 copy.size);
     }
     memory_tracker->UnmarkRegionAsGpuModified(device_addr, size);
+}
+
+// Linux fork: the tick of a GPU write. ObtainBuffer runs where commands are recorded in order
+// with the submissions (the draw recording thread, or the GPU thread with the pipe drained),
+// so the current tick is the submission that writes. Elsewhere (a draw preparation worker)
+// the tick is unknown.
+void BufferCache::NoteGpuWrite(VAddr device_addr, u64 size) {
+    if (!arena_host_mapped || !size) {
+        return;
+    }
+    const u64 tick = scheduler.OwnsRecording() ? scheduler.CurrentTick() : UnknownTick;
+    const u64 first = device_addr >> WriteGranuleBits;
+    const u64 last = (device_addr + size - 1) >> WriteGranuleBits;
+    std::lock_guard lock{write_ticks_lock};
+    for (u64 granule = first; granule <= last; ++granule) {
+        write_ticks[granule] = tick;
+    }
+}
+
+// Linux fork: GPU-written ranges read straight from the mapped arena memory, waiting only for
+// the submission that last wrote them (usually done already) instead of copying them behind all
+// submitted work. In MediEvil's heavy scenes on the Steam Deck one small block written by the
+// CPU about every third frame cost a whole GPU frame (~35 ms) each time: 18-19 FPS.
+bool BufferCache::DownloadMapped(std::span<const std::pair<VAddr, VAddr>> ranges) {
+    if (!arena_host_mapped) {
+        return false;
+    }
+    u64 tick = 0;
+    {
+        std::lock_guard lock{write_ticks_lock};
+        for (const auto& [start, end] : ranges) {
+            for (u64 granule = start >> WriteGranuleBits; granule <= (end - 1) >> WriteGranuleBits;
+                 ++granule) {
+                const auto it = write_ticks.find(granule);
+                if (it == write_ticks.end() || it->second == UnknownTick) {
+                    return false;
+                }
+                tick = std::max(tick, it->second);
+            }
+        }
+    }
+    // Written in the submission still being recorded: it has to go first (the copy as before).
+    if (tick >= scheduler.CurrentTick()) {
+        return false;
+    }
+    // Every range must be resident and mapped.
+    for (const auto& [start, end] : ranges) {
+        const u64 first_block = start >> block_shift;
+        const u64 end_block = ((end - 1) >> block_shift) + 1;
+        u64 covered = 0;
+        bool mapped = true;
+        resident_ranges.ForEachInRange(first_block, end_block, [&](const Backing& backing) {
+            mapped &= backing.mapped != nullptr;
+            covered += std::min(end_block, backing.end) - std::max(first_block, backing.start);
+        });
+        if (!mapped || covered != end_block - first_block) {
+            return false;
+        }
+    }
+    if (!scheduler.IsFree(tick)) {
+        Gow3Stats::WaitTimer timer{Gow3Stats::buffer_download_wait_ns};
+        scheduler.Wait(tick);
+    }
+    Gow3Stats::buffer_downloads_mapped.fetch_add(1, std::memory_order_relaxed);
+    for (const auto& [start, end] : ranges) {
+        resident_ranges.ForEachInRange(start >> block_shift, ((end - 1) >> block_shift) + 1,
+                                       [&](const Backing& backing) {
+            const VAddr begin = std::max<VAddr>(start, backing.start << block_shift);
+            const VAddr finish = std::min<VAddr>(end, backing.end << block_shift);
+            if (begin >= finish) {
+                return;
+            }
+            const u8* source =
+                backing.mapped + backing.offset + (begin - (backing.start << block_shift));
+            memory->TryWriteBacking(std::bit_cast<u8*>(begin), source, finish - begin);
+            Gow3Stats::buffer_download_bytes.fetch_add(finish - begin, std::memory_order_relaxed);
+        });
+    }
+    return true;
 }
 
 namespace {
@@ -360,6 +474,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     }
     if (is_written) {
         gpu_modified_ranges.Add(device_addr, size);
+        NoteGpuWrite(device_addr, size);
     }
     return {arena, arena->Offset(device_addr)};
 }
@@ -490,6 +605,11 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         .memoryTypeIndex = arena_memory_type_index,
     };
     const auto device_memory = Vulkan::Check(instance.GetDevice().allocateMemory(alloc_info));
+    u8* mapped = nullptr;
+    if (arena_host_mapped) {
+        mapped = static_cast<u8*>(Vulkan::Check(
+            instance.GetDevice().mapMemory(device_memory, 0, VK_WHOLE_SIZE)));
+    }
 
     boost::container::small_vector<vk::BufferCopy, 8> copies;
     const auto staging =
@@ -505,6 +625,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         backing.end = range.end;
         backing.memory = device_memory;
         backing.offset = memory_offset;
+        backing.mapped = mapped;
         resident_ranges.Add(backing);
 
         LOG_INFO(Render, "Making range start={}, end={} resident", backing.start, backing.end);
