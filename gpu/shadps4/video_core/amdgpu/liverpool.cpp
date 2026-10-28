@@ -1232,6 +1232,17 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const u64* wait_addr = wait_reg_mem->Address<u64*>();
                 if (vo_port->IsVoLabel(wait_addr) &&
                     num_submits == mapped_queues[GfxQueueId].submits.size()) {
+                    // Linux fork (from the Uncharted Linux fork): a display buffer the presenter
+                    // has released already needs no drain; the recording thread goes on with the
+                    // previous frame while this one is decoded. An unmet wait drains and sleeps
+                    // as before. GOW3_VO_LABEL_DRAIN=1: always drain.
+                    static const bool always_drain = [] {
+                        const char* env = std::getenv("GOW3_VO_LABEL_DRAIN");
+                        return env && env[0] == '1';
+                    }();
+                    if (!always_drain && wait_reg_mem->Test(regs.reg_array)) {
+                        break;
+                    }
                     if (rasterizer) {
                         rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
                     }

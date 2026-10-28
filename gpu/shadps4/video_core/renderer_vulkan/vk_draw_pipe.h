@@ -115,8 +115,18 @@ public:
         for (u32 spins = 0; consumed.load(std::memory_order_acquire) != head; ++spins) {
             if (spins < 4096) {
                 __builtin_ia32_pause();
-            } else {
+            } else if (spins < 4096 + 32) {
                 std::this_thread::yield();
+            } else {
+                // Linux fork (from the Uncharted Linux fork): sleep until stage B moves on.
+                // Yielding in a loop kept a core busy: on the Steam Deck (8 threads) that time
+                // belongs to the game's job workers.
+                drainer_waiting.store(true, std::memory_order_seq_cst);
+                const u64 seen = consumed.load(std::memory_order_seq_cst);
+                if (seen != head) {
+                    consumed.wait(seen, std::memory_order_seq_cst);
+                }
+                drainer_waiting.store(false, std::memory_order_relaxed);
             }
         }
         const u64 waited = __rdtsc() - start;
@@ -198,14 +208,22 @@ private:
             const auto* header = reinterpret_cast<const Header*>(ring.get() + at % Capacity);
             if (header->size == 0) {
                 at += Capacity - at % Capacity;
-                consumed.store(at, std::memory_order_release);
+                Consumed(at);
                 continue;
             }
             const u64 start = __rdtsc();
             handler(context, reinterpret_cast<const u8*>(header + 1), header->payload);
             busy_cycles.fetch_add(__rdtsc() - start, std::memory_order_relaxed);
             at += header->size;
-            consumed.store(at, std::memory_order_release);
+            Consumed(at);
+        }
+    }
+
+    /// Stage B: progress, and a wake-up for a sleeping Drain() (seq_cst against its flag).
+    void Consumed(u64 at) {
+        consumed.store(at, std::memory_order_seq_cst);
+        if (drainer_waiting.load(std::memory_order_seq_cst)) {
+            consumed.notify_one();
         }
     }
 
@@ -217,6 +235,7 @@ private:
     u32 pending_size = 0;
     alignas(64) std::atomic<u64> published{0};
     alignas(64) std::atomic<u64> consumed{0};
+    std::atomic<bool> drainer_waiting{false}; ///< Linux fork: Drain() sleeps on `consumed`
     alignas(64) std::atomic<u32> wake{0};
     std::atomic<bool> sleeping{false};
     std::atomic<u32> stage_b_tid{0};
