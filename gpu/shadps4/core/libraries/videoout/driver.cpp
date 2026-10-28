@@ -56,11 +56,13 @@ static std::atomic<u32> active_frame_limit{0};
 // while on the Steam Deck the game itself handed in frames 22 to 47 ms apart in the title
 // cinematic: it moves its camera by the time it measured, so pans looked choppy. The game's
 // submit-and-flip call waits for its slot of the frame limit, so each frame starts one period
-// after the last. GOW3_GAME_PACING=0: off.
+// after the last. Off by default (GOW3_GAME_PACING=1: on): with the present thread's own limit
+// as a second clock, pyro measured 15 to 57 ms frames instead of +-0.02 ms. To be reworked so
+// that only one of the two paces the frames.
 void PaceGameFrame() {
     static const bool enabled = [] {
         const char* env = std::getenv("GOW3_GAME_PACING");
-        return !(env && env[0] == '0');
+        return env && env[0] == '1';
     }();
     const u32 limit = active_frame_limit.load(std::memory_order_relaxed);
     if (!enabled || !limit) {
