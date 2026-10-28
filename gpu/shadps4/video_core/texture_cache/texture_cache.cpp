@@ -182,6 +182,16 @@ void TextureCache::ProcessDownloadImages() {
         if (idle && !always_wait && !has_pending_readbacks.load(std::memory_order_acquire)) {
             return;
         }
+        // Linux fork: and with nothing to download, readbacks only retire once the GPU is past
+        // the oldest one: until then this would wait for the host copies (~45 times a frame in
+        // MediEvil's heavy scenes on pyro, ~5 ms a frame) to write nothing.
+        if (idle && !always_wait) {
+            std::scoped_lock readback_lock{readback_mutex};
+            const u64 oldest = pending_readbacks.OldestTick();
+            if (!oldest || !scheduler.IsFree(oldest)) {
+                return;
+            }
+        }
         // Upload workers must finish reading RAM before these pages become inaccessible.
         Gow3Stats::WaitSite site{Gow3Stats::SiteDownload};
         scheduler.WaitHostCopies();
