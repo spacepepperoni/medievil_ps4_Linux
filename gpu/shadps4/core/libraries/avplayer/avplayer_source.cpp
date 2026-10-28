@@ -387,7 +387,7 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
             return env ? std::max(0, std::atoi(env)) : 16;
         }();
         if (s64(new_frame.info.timestamp) > s64(current_time) + early_ms) {
-            MovieStats(false, 0);
+            MovieStats(false, 0, 0);
             return false;
         }
     }
@@ -399,8 +399,24 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
     }
 
     auto frame = m_video_frames.Pop();
+    // Linux fork: a frame more than two frames behind the clock is skipped while the next one is
+    // due too, so a movie that started late catches up instead of staying behind its sound.
+    // GOW3_MOVIE_CATCHUP=0 shows every frame.
+    static const bool catch_up = [] {
+        const char* env = std::getenv("GOW3_MOVIE_CATCHUP");
+        return !(env && env[0] == '0');
+    }();
+    u32 skipped = 0;
+    while (catch_up && m_state.GetSyncMode() == AvPlayerAvSyncMode::Default &&
+           s64(current_time) - s64(frame->info.timestamp) > 67 && m_video_frames.Size() > 0 &&
+           s64(m_video_frames.Front().info.timestamp) <= s64(current_time)) {
+        m_video_buffers.Push(std::move(frame->buffer));
+        m_video_buffers_cv.Notify();
+        frame = m_video_frames.Pop();
+        ++skipped;
+    }
     video_info = frame->info;
-    MovieStats(true, s64(current_time) - s64(frame->info.timestamp));
+    MovieStats(true, s64(current_time) - s64(frame->info.timestamp), skipped);
 
     m_current_video_frame = std::move(frame);
     return true;
@@ -408,7 +424,7 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
 
 // Linux fork: GOW3_FRAME_STATS=1 prints every 5 s how evenly movie frames reached the game:
 // frames handed out, polls that found none due (the last frame shown again) and late frames.
-void AvPlayerSource::MovieStats(bool shown, s64 late_ms) {
+void AvPlayerSource::MovieStats(bool shown, s64 late_ms, u32 skipped_now) {
     static const bool enabled = [] {
         const char* env = std::getenv("GOW3_FRAME_STATS");
         return env && env[0] == '1';
@@ -417,22 +433,27 @@ void AvPlayerSource::MovieStats(bool shown, s64 late_ms) {
         return;
     }
     static std::mutex mutex;
-    static u32 frames, repeats, late;
+    static u32 frames, repeats, late, skipped;
+    static s64 lag_sum;
     static auto window = std::chrono::steady_clock::now();
     std::scoped_lock lock{mutex};
     if (shown) {
         ++frames;
         late += late_ms > 33;
+        lag_sum += late_ms;
+        skipped += skipped_now;
     } else {
         ++repeats;
     }
     const auto now = std::chrono::steady_clock::now();
     if (now - window >= std::chrono::seconds(5)) {
         if (frames) {
-            std::printf("Movie frames: %u shown, %u polls without a new one, %u late (>33 ms)\n",
-                        frames, repeats, late);
+            std::printf("Movie frames: %u shown, %u polls without a new one, %u late (>33 ms), "
+                        "%u skipped to catch up, behind the clock by %.0f ms on average\n",
+                        frames, repeats, late, skipped, double(lag_sum) / frames);
         }
-        frames = repeats = late = 0;
+        frames = repeats = late = skipped = 0;
+        lag_sum = 0;
         window = now;
     }
 }
