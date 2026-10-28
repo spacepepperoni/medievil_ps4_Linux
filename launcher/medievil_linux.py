@@ -244,7 +244,10 @@ DECK_FPS = [('30', ('30 (recommended)',)), ('60', ('60',))]
 # medievil.ini values (the game and the in-game menu read the same file).
 DECK_SETTINGS = {
     'display_mode': 'fullscreen',         # gamescope (Game Mode) scales the window to the screen
-    'render_resolution': '720p_native',   # the game itself runs at 720p, no 1080p pass to shrink
+    # The 3D scene at 720p inside the game's 1080p output (gamescope scales that to the screen).
+    # 720p_native (the whole output at 1280x720) showed the 1080p loading screens and movies
+    # cropped, zoomed in with illegible text; at 30 FPS the Deck holds 720p the same.
+    'render_resolution': '720p',
     'ue4_quality': 'low',                 # upstream's setting for integrated graphics
     'vsync': '1',
 }
@@ -252,19 +255,25 @@ DECK_LOCKED = (*DECK_SETTINGS, 'fps_limit')
 APP_DEFAULTS = {'deck_mode': False, 'deck_fps': '30'}
 
 
-def deck_30fps(settings, ini_path):
-    """Steam Deck mode's default became 30 FPS: settings saved by an older launcher switch to 30
-    once (settings.json and, when the mode is on, fps_limit in medievil.ini), also for a start from
-    Steam that never opens the launcher. Returns True when the settings changed (to be saved)."""
-    if settings.get('deck_30fps'):
-        return False
-    settings['deck_30fps'] = True
-    if settings.get('deck_fps', '30') != '30':
-        settings['deck_fps'] = '30'
-        if settings.get('deck_mode'):
-            import graphics_options
-            graphics_options.write_keys(ini_path, {'fps_limit': '30'})
-    return True
+def deck_updates(settings, ini_path):
+    """Steam Deck mode's values changed: settings saved by an older launcher take them once
+    (settings.json and, when the mode is on, medievil.ini), also for a start from Steam that never
+    opens the launcher. 30 FPS became the default (deck_30fps) and the 720p scene scale replaced
+    720p native output (deck_720p). Returns True when the settings changed (to be saved)."""
+    import graphics_options
+    changed = False
+    if not settings.get('deck_30fps'):
+        settings['deck_30fps'] = changed = True
+        if settings.get('deck_fps', '30') != '30':
+            settings['deck_fps'] = '30'
+            if settings.get('deck_mode'):
+                graphics_options.write_keys(ini_path, {'fps_limit': '30'})
+    if not settings.get('deck_720p'):
+        settings['deck_720p'] = changed = True
+        if settings.get('deck_mode') and \
+                graphics_options.read_ini(ini_path).get('render_resolution') == '720p_native':
+            graphics_options.write_keys(ini_path, {'render_resolution': '720p'})
+    return changed
 
 
 def steam_os():
@@ -324,7 +333,7 @@ def build_deck_section(launcher, frame, _, ini_flags):
     """The Steam Deck section at the top of the Display page."""
     launcher.section(frame, _('Steam Deck'), top=4)
     launcher.check(frame, 'deck_mode', 'app', _('Steam Deck mode'),
-                   _('Fullscreen, 720p native output, Low graphics quality and the frame rate below; those '
+                   _('Fullscreen, 720p render resolution, Low graphics quality and the frame rate below; those '
                      'settings are locked while it is on. Turn it off to choose your own again.'))
     box = launcher.choice(frame, 'deck_fps', 'app', DECK_FPS, width=24)
     launcher.row(frame, _('Steam Deck frame rate'), box)

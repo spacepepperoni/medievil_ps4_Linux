@@ -2092,9 +2092,9 @@ def main():
     args = sys.argv[1:]
     if args and args[0] in ('--run', '--script'):
         sys.exit(run_role(args))
-    if not WINDOWS:  # Linux fork: Steam Deck mode's 30 FPS default, applied to older settings once
+    if not WINDOWS:  # Linux fork: Steam Deck mode's newer values, applied to older settings once
         saved = load_json(CONFIG_FILE, {})
-        if saved and medievil_linux.deck_30fps(saved, ini_path()):
+        if saved and medievil_linux.deck_updates(saved, ini_path()):
             CONFIG_FILE.write_text(json.dumps(saved, indent=2, ensure_ascii=False), encoding='utf-8')
     settings = {**APP_DEFAULTS, **load_json(CONFIG_FILE, {})}
     LANG = settings.get('ui_language') or windows_language()
