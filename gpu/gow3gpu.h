@@ -42,6 +42,9 @@ void gow3gpu_choice_set_input(uint32_t (*buttons)(void));
 int gow3gpu_overlay_captures_input(void);
 /* Number of symbols registered by the vendored libraries (diagnostics). */
 unsigned gow3gpu_symbol_count(void);
+/* Linux fork: the video decoder finished a movie picture (sceVideodec). While movies play, a
+ * frame limit below 60 FPS steps aside (runtime_videodec.c, videoout driver). */
+void gow3gpu_movie_frame(void);
 #ifdef __cplusplus
 }
 #endif
