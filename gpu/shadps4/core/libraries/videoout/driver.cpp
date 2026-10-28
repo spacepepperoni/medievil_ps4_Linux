@@ -47,6 +47,10 @@ extern std::atomic<u32> g_gow3_pending_draws;
 
 namespace Libraries::VideoOut {
 
+// Linux fork: the game's own flip calls (NoteGuestFlip), for "Game pacing" in the frame stats.
+static std::mutex guest_flip_mutex;
+static std::vector<double> guest_flip_intervals;
+
 constexpr static bool Is32BppPixelFormat(PixelFormat format) {
     switch (format) {
     case PixelFormat::A8R8G8B8Srgb:
@@ -625,8 +629,6 @@ void VideoOutDriver::DrawLastFrame() {
 // Linux fork: when the game itself submits its flips (sceVideoOutSubmitFlip), for "Game pacing"
 // beside "Frame pacing" (the presents): a camera pan judders when the game takes its frames at
 // uneven moments even though they are shown evenly.
-static std::mutex guest_flip_mutex;
-static std::vector<double> guest_flip_intervals;
 void NoteGuestFlip() {
     using Clock = std::chrono::steady_clock;
     static Clock::time_point last;
