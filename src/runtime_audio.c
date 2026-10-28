@@ -172,13 +172,25 @@ static float soft_limit(float v) {
 }
 static int downmix_stereo(const Port *p, unsigned char *buffer) {
     const float k=0.70710678f;
+    /* Linux fork: the surrounds at -9 dB, not -3 dB. MediEvil's sound engine (Wwise, told the
+       port has 8 channels) puts delayed copies of positioned sounds into the side and back
+       channels (side left ~8 ms after front left, side right ~37 ms after front right): folded
+       in at -3 dB they sounded like every sound effect played twice. GOW3_AUDIO_SURROUND sets the
+       level, 0 (fronts and centre only) to 0.71 (the -3 dB fold). */
+    static float ks=-1.0f;
+    if (ks<0.0f) {
+        const char *e=getenv("GOW3_AUDIO_SURROUND");
+        ks=e ? (float)atof(e) : 0.35f;
+        if (ks<0.0f || ks>1.0f) ks=0.35f;
+        printf("Runtime: stereo fold of the surround channels at %.2f\n",(double)ks);
+    }
     for (int f=0;f<p->frames;++f) {
         float c[8];
         for (int i=0;i<8;++i) {
             if (p->is_float) memcpy(&c[i],buffer+((size_t)f*8+(size_t)i)*4,4);
             else { int16_t v; memcpy(&v,buffer+((size_t)f*8+(size_t)i)*2,2); c[i]=(float)v/32768.0f; }
         }
-        const float l=soft_limit(c[0]+k*c[2]+k*(c[6]+c[4])), r=soft_limit(c[1]+k*c[2]+k*(c[7]+c[5]));
+        const float l=soft_limit(c[0]+k*c[2]+ks*(c[6]+c[4])), r=soft_limit(c[1]+k*c[2]+ks*(c[7]+c[5]));
         if (p->is_float) { memcpy(buffer+(size_t)f*8,&l,4); memcpy(buffer+(size_t)f*8+4,&r,4); }
         else {
             const int16_t sl=(int16_t)(l*32767.0f), sr=(int16_t)(r*32767.0f);
