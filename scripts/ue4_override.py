@@ -378,6 +378,12 @@ def apply(game, resolution='native', quality='console', fps=60, debug_menu=False
     if aa_quality is not None:
         values['r.PostProcessAAQuality'] = aa_quality
     engine = frame_rate_range(fps) if fps > 60 else {}
+    # Linux fork: GOW3_FIXED_FRAME_RATE=30 (recording or replaying inputs for testing): the game
+    # advances exactly 1/30 s per frame, so a replay simulates the same as the recording did,
+    # whatever the machine's frame times.
+    fixed = os.environ.get('GOW3_FIXED_FRAME_RATE', '')
+    if fixed.isdigit() and int(fixed) > 0:
+        engine.update({'bUseFixedFrameRate': 'True', 'FixedFrameRate': f'{int(fixed)}.000000'})
     # Linux fork: Xbox or Steam Deck button pictures (button_prompts.py).
     import button_prompts
     try:

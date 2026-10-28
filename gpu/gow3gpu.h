@@ -42,6 +42,9 @@ void gow3gpu_choice_set_input(uint32_t (*buttons)(void));
 int gow3gpu_overlay_captures_input(void);
 /* Number of symbols registered by the vendored libraries (diagnostics). */
 unsigned gow3gpu_symbol_count(void);
+/* Linux fork: the game's frame position, for frame-stamped input recording and replay: the
+ * segment (one more after each loading frame over 700 ms) and the frame within it. */
+void gow3gpu_frame_position(uint32_t *segment, uint32_t *frame);
 /* Linux fork: a movie frame was decoded (sceVideodec) or handed to the game (AvPlayer, which
  * MediEvil's movies use). While movies play, a frame limit below 60 FPS steps aside. */
 void gow3gpu_movie_frame(void);

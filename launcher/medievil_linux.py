@@ -252,7 +252,7 @@ DECK_SETTINGS = {
     'vsync': '1',
 }
 DECK_LOCKED = (*DECK_SETTINGS, 'fps_limit')
-APP_DEFAULTS = {'deck_mode': False, 'deck_fps': '30'}
+APP_DEFAULTS = {'deck_mode': False, 'deck_fps': '30', 'record_inputs': False}
 
 
 def deck_updates(settings, ini_path):

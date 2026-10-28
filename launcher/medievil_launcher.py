@@ -394,6 +394,9 @@ def game_environment(s):
     env.setdefault('GOW3_FPS_LOG', '1')  # FPS and worst frame every 5 s in the log (diagnostics)
     if not WINDOWS:  # Linux fork: Xbox or Steam Deck pictures in the game's prompts
         env['GOW3_BUTTON_PROMPTS'] = s.get('pad_style') or 'playstation'
+    if not WINDOWS and s.get('record_inputs'):  # Linux fork: frame-stamped input recording
+        env['GOW3_PAD_RECORD_AUTO'] = '1'
+        env['GOW3_FIXED_FRAME_RATE'] = '30'
     env.setdefault('GOW3_FRAME_STATS', '1')  # draws, compiles and stalls every 5 s (diagnostics)
     # F12 in the game saves a PNG screenshot of the game's picture.
     env.setdefault('GOW3_SCREENSHOT_DIR', str(screenshots_dir(s)))
@@ -1456,6 +1459,11 @@ class Launcher:
         self.check(f, 'update_check', 'app', _('Check for updates when the launcher opens'),
                    _('Asks GitHub for a newer release; when there is one, the sidebar offers to download and '
                      'install it (saves, settings and mods are kept).'))
+        if not WINDOWS:  # Linux fork: input recordings for the test bench
+            self.check(f, 'record_inputs', 'app', _('Record my inputs for testing'),
+                       _('Records every button and stick of each session, frame by frame, into pad-recordings in '
+                         'the saves folder, and runs the game on a fixed 30 FPS clock meanwhile (it slows down '
+                         'briefly where the Deck cannot keep up), so the recording can be replayed exactly.'))
         self.section(f, _('Files'))
         holder = ttk.Frame(f)
         holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(6, 0))

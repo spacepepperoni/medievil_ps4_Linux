@@ -365,15 +365,25 @@ static PadSample record_last;
  * without GOW3_PAD_RECORD: then each one goes to <user dir>/pad-recordings/route-<date>-<time>.txt,
  * for the pyro test bench to replay. Games started from Steam see Steam's virtual controller,
  * which hides the grips: bind L4 or R4 to the keyboard key F9 in the game's controller layout. */
+/* Linux fork: GOW3_PAD_RECORD_AUTO=1 (the launcher's "Record my inputs for testing") records the
+ * whole session from the first frame, frame-stamped ("# v2": segment, frame within it, then the
+ * pad state), so the pyro test bench replays it frame for frame and re-synchronises after every
+ * load (gow3gpu_frame_position). */
+static int record_v2;
 static void record_sample(const PadData *d) {
-    static const char *env_path; static int checked, f9_was_down, sticks_were_down;
+    static const char *env_path; static int checked, f9_was_down, sticks_were_down, auto_mode;
     static char path[4096];
-    if (!checked) { env_path=getenv("GOW3_PAD_RECORD"); checked=1; }
+    if (!checked) {
+        env_path=getenv("GOW3_PAD_RECORD"); checked=1;
+        const char *a=getenv("GOW3_PAD_RECORD_AUTO"); auto_mode=a && a[0]=='1';
+    }
     if (!sdl_ready) return;
     const bool *k=SDL_GetKeyboardState(NULL);
     const int f9=k && k[SDL_SCANCODE_F9];
     const int sticks=back_grips_down();
-    if ((f9 && !f9_was_down) || (sticks && !sticks_were_down)) {
+    const int auto_start=auto_mode==1;
+    if (auto_start) auto_mode=2;
+    if (auto_start || (f9 && !f9_was_down) || (sticks && !sticks_were_down)) {
         if (record_file) {
             fclose(record_file); record_file=NULL;
             printf("Runtime: pad recording stopped (%s)\n",path);
@@ -393,6 +403,8 @@ static void record_sample(const PadData *d) {
             if ((record_file=fopen(path,"w"))) {
                 record_start=now_us();
                 memset(&record_last,0xff,sizeof(record_last));
+                record_v2=auto_start;
+                if (record_v2) fputs("# v2 segment frame buttons lx ly rx ry l2 r2\n",record_file);
                 printf("Runtime: pad recording started (%s, F9 or L4+R4 stops)\n",path);
             }
         }
@@ -405,28 +417,67 @@ static void record_sample(const PadData *d) {
     if (s.buttons==record_last.buttons && !memcmp(s.axes,record_last.axes,4) &&
         s.l2==record_last.l2 && s.r2==record_last.r2) return;
     record_last=s;
-    fprintf(record_file,"%u %u %u %u %u %u %u %u\n",s.ms,s.buttons,s.axes[0],s.axes[1],s.axes[2],
-            s.axes[3],s.l2,s.r2);
+    if (record_v2) {
+        uint32_t segment, frame; gow3gpu_frame_position(&segment,&frame);
+        fprintf(record_file,"%u %u %u %u %u %u %u %u %u\n",segment,frame,s.buttons,s.axes[0],s.axes[1],
+                s.axes[2],s.axes[3],s.l2,s.r2);
+    } else
+        fprintf(record_file,"%u %u %u %u %u %u %u %u\n",s.ms,s.buttons,s.axes[0],s.axes[1],s.axes[2],
+                s.axes[3],s.l2,s.r2);
     fflush(record_file);
 }
 static PadSample *replay; static size_t replay_count, replay_next;
-static void replay_sample(PadData *d) {
-    if (!replay_armed) return;
-    if (!replay_start) {
-        static int loaded;
-        if (!loaded) {
-            loaded=1;
-            const char *path=getenv("GOW3_PAD_REPLAY");
-            FILE *f=path ? fopen(path,"r") : NULL;
-            PadSample s; unsigned v[8]; size_t cap=0;
-            while (f && fscanf(f,"%u %u %u %u %u %u %u %u",&v[0],&v[1],&v[2],&v[3],&v[4],&v[5],&v[6],&v[7])==8) {
-                s=(PadSample){v[0],v[1],{(uint8_t)v[2],(uint8_t)v[3],(uint8_t)v[4],(uint8_t)v[5]},(uint8_t)v[6],(uint8_t)v[7]};
-                if (replay_count==cap && !(replay=realloc(replay,(cap=cap ? cap*2 : 1024)*sizeof(*replay)))) break;
-                replay[replay_count++]=s;
-            }
-            if (f) fclose(f);
-            printf("Runtime: pad replay of %zu samples from %s\n",replay_count,path ? path : "(unset)");
+static uint32_t *replay_segment; /* Linux fork: v2 recordings, the segment of each sample (ms = frame) */
+static int replay_v2;
+static void replay_load(void) {
+    static int loaded;
+    if (loaded) return;
+    loaded=1;
+    const char *path=getenv("GOW3_PAD_REPLAY");
+    FILE *f=path ? fopen(path,"r") : NULL;
+    char line[256]; size_t cap=0;
+    while (f && fgets(line,sizeof(line),f)) {
+        if (!strncmp(line,"# v2",4)) { replay_v2=1; continue; }
+        unsigned v[9]; PadSample s; uint32_t seg=0;
+        if (replay_v2) {
+            if (sscanf(line,"%u %u %u %u %u %u %u %u %u",&v[0],&v[1],&v[2],&v[3],&v[4],&v[5],&v[6],&v[7],&v[8])!=9) continue;
+            seg=v[0];
+            s=(PadSample){v[1],v[2],{(uint8_t)v[3],(uint8_t)v[4],(uint8_t)v[5],(uint8_t)v[6]},(uint8_t)v[7],(uint8_t)v[8]};
+        } else {
+            if (sscanf(line,"%u %u %u %u %u %u %u %u",&v[0],&v[1],&v[2],&v[3],&v[4],&v[5],&v[6],&v[7])!=8) continue;
+            s=(PadSample){v[0],v[1],{(uint8_t)v[2],(uint8_t)v[3],(uint8_t)v[4],(uint8_t)v[5]},(uint8_t)v[6],(uint8_t)v[7]};
         }
+        if (replay_count==cap) {
+            cap=cap ? cap*2 : 1024;
+            PadSample *r=realloc(replay,cap*sizeof(*replay)); uint32_t *g=realloc(replay_segment,cap*sizeof(*g));
+            if (!r || !g) { free(r); free(g); replay=NULL; replay_segment=NULL; replay_count=0; break; }
+            replay=r; replay_segment=g;
+        }
+        replay_segment[replay_count]=seg; replay[replay_count++]=s;
+    }
+    if (f) fclose(f);
+    printf("Runtime: pad replay of %zu samples from %s%s\n",replay_count,path ? path : "(unset)",
+           replay_v2 ? " (frame-stamped, starts by itself)" : "");
+    if (replay_v2 && replay_count) replay_armed=1;
+}
+static void replay_sample(PadData *d) {
+    if (!replay_armed && getenv("GOW3_PAD_REPLAY")) replay_load();
+    if (!replay_armed) return;
+    if (replay_v2) {
+        uint32_t segment, frame; gow3gpu_frame_position(&segment,&frame);
+        while (replay_next<replay_count && (replay_segment[replay_next]<segment ||
+               (replay_segment[replay_next]==segment && replay[replay_next].ms<=frame))) ++replay_next;
+        if (!replay_next) return;
+        if (replay_next==replay_count && replay_armed==1) { puts("Runtime: pad replay finished"); replay_armed=2; }
+        if (replay_armed==2) return;
+        const PadSample *s=&replay[replay_next-1];
+        d->buttons=s->buttons;
+        d->left_x=s->axes[0]; d->left_y=s->axes[1]; d->right_x=s->axes[2]; d->right_y=s->axes[3];
+        d->l2=s->l2; d->r2=s->r2;
+        return;
+    }
+    if (!replay_start) {
+        replay_load();
         replay_start=now_us();
         replay_next=0;
     }

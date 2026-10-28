@@ -662,10 +662,25 @@ void VideoOutDriver::DrawLastFrame() {
 // Linux fork: when the game itself submits its flips (sceVideoOutSubmitFlip), for "Game pacing"
 // beside "Frame pacing" (the presents): a camera pan judders when the game takes its frames at
 // uneven moments even though they are shown evenly.
+// Linux fork: the game's frames counted, for frame-stamped input recording and replay
+// (runtime_pad.c). A frame over 700 ms (a level or map loading) starts a new segment, so a replay
+// re-synchronises after every load however long the load took on that machine.
+static std::atomic<u32> guest_segment{0};
+static std::atomic<u64> guest_frames{0}, segment_first_frame{0};
+void FramePosition(u32* segment, u32* frame) {
+    *segment = guest_segment.load(std::memory_order_acquire);
+    *frame = u32(guest_frames.load(std::memory_order_acquire) - segment_first_frame.load(std::memory_order_acquire));
+}
+
 void NoteGuestFlip() {
     using Clock = std::chrono::steady_clock;
     static Clock::time_point last;
     const auto now = Clock::now();
+    if (last.time_since_epoch().count() && now - last > std::chrono::milliseconds(700)) {
+        segment_first_frame.store(guest_frames.load(std::memory_order_relaxed), std::memory_order_release);
+        guest_segment.fetch_add(1, std::memory_order_acq_rel);
+    }
+    guest_frames.fetch_add(1, std::memory_order_acq_rel);
     std::scoped_lock lock{guest_flip_mutex};
     if (last.time_since_epoch().count() && guest_flip_intervals.size() < 4096) {
         guest_flip_intervals.push_back(std::chrono::duration<double, std::milli>(now - last).count());

@@ -340,6 +340,13 @@ bool Gow3MoviePlaying() {
     return last && std::chrono::steady_clock::now().time_since_epoch().count() - last < 250000000;
 }
 
+namespace Libraries::VideoOut {
+void FramePosition(u32* segment, u32* frame); // Linux fork: driver.cpp
+}
+extern "C" void gow3gpu_frame_position(uint32_t* segment, uint32_t* frame) {
+    Libraries::VideoOut::FramePosition(segment, frame);
+}
+
 extern "C" int gow3gpu_overlay_captures_input(void) {
     return Gow3Overlay::CapturesInput() ? 1 : 0;
 }
