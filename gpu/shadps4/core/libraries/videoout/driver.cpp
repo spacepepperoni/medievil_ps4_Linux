@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cmath>
 #include <vector>
+#include <atomic>
+#include <thread>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -46,6 +48,35 @@ extern std::atomic<u32> g_gow3_pending_draws;
 } // namespace Vulkan
 
 namespace Libraries::VideoOut {
+
+// Linux fork: the frame limit in force (0: none), for the game-side pacing (PaceGameFrame).
+static std::atomic<u32> active_frame_limit{0};
+
+// Linux fork: the game's own loop at even intervals. The presents were even (33.33 ms +-0.02)
+// while on the Steam Deck the game itself handed in frames 22 to 47 ms apart in the title
+// cinematic: it moves its camera by the time it measured, so pans looked choppy. The game's
+// submit-and-flip call waits for its slot of the frame limit, so each frame starts one period
+// after the last. GOW3_GAME_PACING=0: off.
+void PaceGameFrame() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_GAME_PACING");
+        return !(env && env[0] == '0');
+    }();
+    const u32 limit = active_frame_limit.load(std::memory_order_relaxed);
+    if (!enabled || !limit) {
+        return;
+    }
+    using Clock = std::chrono::steady_clock;
+    static Clock::time_point next;
+    const auto period = std::chrono::nanoseconds(1000000000 / limit);
+    const auto now = Clock::now();
+    if (next.time_since_epoch().count() == 0 || now > next + period) {
+        next = now; // first frame, or more than a frame late: start again from now
+    } else if (now < next) {
+        std::this_thread::sleep_until(next);
+    }
+    next += period;
+}
 
 // Linux fork: the game's own flip calls (NoteGuestFlip), for "Game pacing" in the frame stats.
 static std::mutex guest_flip_mutex;
@@ -771,6 +802,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     auto next_flip = std::chrono::steady_clock::now();
     std::printf("VideoOut: vblank %u Hz, frame limit %u FPS\n",
                 EmulatorSettings.GetVblankFrequency(), frame_limit);
+    active_frame_limit.store(frame_limit, std::memory_order_relaxed);
 
     const auto receive_request = [this] -> Request {
         std::scoped_lock lk{mutex};
@@ -793,6 +825,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             immediate_flips = limit != 0;
             next_flip = std::chrono::steady_clock::now();
             std::printf("VideoOut: frame limit %u FPS\n", limit);
+            active_frame_limit.store(limit, std::memory_order_relaxed);
         }
         timer.Start();
         const auto tick_deadline = std::chrono::steady_clock::now() + vblank_period;
