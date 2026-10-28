@@ -353,6 +353,7 @@ bool AvPlayerSource::Stop() {
     m_start_time.reset();
     m_pause_time = {};
     m_pause_duration = {};
+    m_wall_pause = {};
 
     m_is_paused = false;
     m_is_eof = false;
@@ -367,6 +368,7 @@ void AvPlayerSource::Pause() {
 
 void AvPlayerSource::Resume() {
     m_pause_duration += std::chrono::high_resolution_clock::now() - m_pause_time;
+    m_wall_pause += std::chrono::high_resolution_clock::now() - m_pause_time;
     m_is_paused = false;
 }
 
@@ -495,6 +497,16 @@ bool AvPlayerSource::GetAudioData(AvPlayerFrameInfo& audio_info) {
         m_audio_buffers_cv.Notify();
     }
 
+    // Linux fork: sound is handed out only shortly before it is due on the playback clock, as
+    // the PS4 does. Handing out all that was decoded let MediEvil's audio engine buffer a second
+    // and more ahead: the movies' sound came ~1 s after the picture on the Steam Deck, and the
+    // clock (taken from the sound handed out) ran ahead of the picture. GOW3_MOVIE_AUDIO_LEAD_MS
+    // (default 150); GOW3_MOVIE_AUDIO_LEAD_MS=-1: as before.
+    if (PacedAudio() && m_state.GetSyncMode() == AvPlayerAvSyncMode::Default &&
+        s64(m_audio_frames.Front().info.timestamp) > s64(CurrentTime()) + AudioLeadMs()) {
+        return false;
+    }
+
     auto frame = m_audio_frames.Pop();
     m_last_audio_ts = frame->info.timestamp;
     m_last_data_time = std::chrono::high_resolution_clock::now();
@@ -549,6 +561,18 @@ u64 AvPlayerSource::DurationMillis() const {
     return duration;
 }
 
+s64 AvPlayerSource::AudioLeadMs() {
+    static const s64 lead = [] {
+        const char* env = std::getenv("GOW3_MOVIE_AUDIO_LEAD_MS");
+        return env ? s64(std::atoi(env)) : s64(150);
+    }();
+    return lead;
+}
+
+bool AvPlayerSource::PacedAudio() {
+    return AudioLeadMs() >= 0;
+}
+
 u64 AvPlayerSource::CurrentTime() {
     if (!m_start_time.has_value()) {
         return 0;
@@ -563,6 +587,15 @@ u64 AvPlayerSource::CurrentTime() {
 
     using namespace std::chrono;
     const auto now = m_is_paused.load() ? m_pause_time : high_resolution_clock::now();
+    if (PacedAudio()) {
+        // Linux fork: the wall clock since Start, without pauses (see GetAudioData).
+        const auto wall =
+            duration_cast<milliseconds>(now - m_start_time.value() - m_wall_pause).count();
+        if (wall <= 0) {
+            return 0;
+        }
+        return m_duration != 0 && u64(wall) > m_duration ? m_duration : u64(wall);
+    }
     if (m_audio_stream_index) {
         const auto last_audio = m_last_data_time.value_or(now);
         const auto elapsed =
