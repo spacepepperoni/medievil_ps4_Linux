@@ -394,6 +394,12 @@ def game_environment(s):
     env.setdefault('GOW3_FPS_LOG', '1')  # FPS and worst frame every 5 s in the log (diagnostics)
     if not WINDOWS:  # Linux fork: Xbox or Steam Deck pictures in the game's prompts
         env['GOW3_BUTTON_PROMPTS'] = s.get('pad_style') or 'playstation'
+    if not WINDOWS and s.get('deck_mode') and s.get('deck_steady_clock', True):
+        # Linux fork: Steam Deck mode runs the game on a fixed clock at the Deck frame rate. With
+        # its measured clock a slow frame moved the camera by the whole delay at once (the title
+        # pan jumped ahead several frames, the spider popped in instead of fading); fixed, every
+        # frame advances one step and a heavy moment runs a little slower instead.
+        env['GOW3_FIXED_FRAME_RATE'] = str(s.get('deck_fps') or '30')
     if not WINDOWS and s.get('record_inputs'):  # Linux fork: frame-stamped input recording
         env['GOW3_PAD_RECORD_AUTO'] = '1'
         env['GOW3_FIXED_FRAME_RATE'] = '30'

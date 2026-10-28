@@ -252,7 +252,7 @@ DECK_SETTINGS = {
     'vsync': '1',
 }
 DECK_LOCKED = (*DECK_SETTINGS, 'fps_limit')
-APP_DEFAULTS = {'deck_mode': False, 'deck_fps': '30', 'record_inputs': False}
+APP_DEFAULTS = {'deck_mode': False, 'deck_fps': '30', 'record_inputs': False, 'deck_steady_clock': True}
 
 
 def deck_updates(settings, ini_path):
@@ -349,6 +349,10 @@ def build_deck_section(launcher, frame, _, ini_flags):
                      'settings are locked while it is on. Turn it off to choose your own again.'))
     box = launcher.choice(frame, 'deck_fps', 'app', DECK_FPS, width=24)
     launcher.row(frame, _('Steam Deck frame rate'), box)
+    launcher.check(frame, 'deck_steady_clock', 'app', _('Steady game clock'),
+                   _('The game moves exactly one frame step per frame at the frame rate above: smooth camera '
+                     'pans and fades instead of jumps after a slow frame; a heavy moment runs a little slower '
+                     'instead. Steam Deck mode only.'))
     launcher.deck_fps_widgets = [box]
     launcher.var('deck_mode', 'app').trace_add('write', lambda *_a: deck_switch(launcher, ini_flags))
     launcher.var('deck_fps', 'app').trace_add('write', lambda *_a: launcher.var('deck_mode', 'app').get() and
