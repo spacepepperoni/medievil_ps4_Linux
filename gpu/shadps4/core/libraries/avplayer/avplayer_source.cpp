@@ -168,7 +168,12 @@ AvPlayerStreamInfo AvPlayerSource::CreateStreamInfo(u32 stream_index) {
     }
     case AvPlayerStreamType::Audio: {
         LOG_INFO(Lib_AvPlayer, "Stream {} is an audio stream.", stream_index);
-        info.details.audio.channel_count = p_stream->codecpar->ch_layout.nb_channels;
+        // Linux fork: never 0 channels. MediEvil divides an audio chunk's size by channels x 2
+        // (SIGFPE on the Steam Deck after finishing a level, while a movie played).
+        info.details.audio.channel_count = u16(std::max(1, p_stream->codecpar->ch_layout.nb_channels));
+        if (p_stream->codecpar->ch_layout.nb_channels <= 0) {
+            LOG_WARNING(Lib_AvPlayer, "audio stream without a channel count: reported as 1");
+        }
         info.details.audio.sample_rate = p_stream->codecpar->sample_rate;
         info.details.audio.size = 0; // sceAvPlayerGetStreamInfo() is expected to set this to 0
         if (p_lang_node != nullptr) {
@@ -883,7 +888,7 @@ Frame AvPlayerSource::PrepareAudioFrame(GuestBuffer buffer, const AVFrame& frame
                     {
                         .audio =
                             {
-                                .channel_count = u16(frame.ch_layout.nb_channels),
+                                .channel_count = u16(std::max(1, frame.ch_layout.nb_channels)),
                                 .sample_rate = u32(frame.sample_rate),
                                 .size = u32(size),
                             },
