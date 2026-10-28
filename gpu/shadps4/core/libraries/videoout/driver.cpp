@@ -732,16 +732,20 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             const char* env = std::getenv("GOW3_MOVIE_LIMIT");
             return env && env[0] == '1';
         }();
+        // Measured over windows of 4 flips: 60 FPS only after 8 quiet windows in a row (about
+        // a second; loading screens and the first frames of a cinematic flipped it back and
+        // forth), back to the limit after one busy window.
         static u64 last_draws, last_flips;
-        static double draws_per_frame = 1e9;
+        static u32 quiet_windows;
         static bool movie_only;
         const u64 all_draws = Gow3Stats::draws.load(std::memory_order_relaxed);
         const u64 flips = u64(main_port.flip_status.count);
-        if (flips - last_flips >= 8) {
-            draws_per_frame = double(all_draws - last_draws) / double(flips - last_flips);
+        if (flips - last_flips >= 4) {
+            const double draws_per_frame = double(all_draws - last_draws) / double(flips - last_flips);
             last_draws = all_draws;
             last_flips = flips;
-            movie_only = movie_only ? draws_per_frame < 120 : draws_per_frame < 60;
+            quiet_windows = draws_per_frame < 60 ? quiet_windows + 1 : 0;
+            movie_only = movie_only ? draws_per_frame < 120 : quiet_windows >= 8;
         }
         if (user && user < 60 && !keep_for_movies && movie_only && Gow3MoviePlaying()) {
             user = 60;

@@ -297,7 +297,19 @@ static ABI int32_t audio_state(int32_t handle, PortState *state) {
     switch (p->type) {
     case 2: case 3: state->output=0x40; state->channel=1; break;          /* headphone */
     case 4: state->output=0x04; state->channel=1; state->volume=127; break; /* pad speaker */
-    default: state->output=0x01; state->channel=(uint8_t)(p->channels>2 ? 2 : p->channels); break;
+    default: {
+        /* Linux fork: the port's real channel count. Reported as 2, the game's sound engine
+           (Wwise) folded its surround and positioned sounds into stereo itself with a matrix
+           downmix: a phase-inverted copy in the other ear about 11 ms later, which sounded
+           doubled and hollow on headphones (zombies, voices). Told 8, it mixes discrete 7.1 and
+           this port folds the surrounds into left and right in phase (downmix_stereo).
+           GOW3_AUDIO_PORT_CHANNELS=2: report 2 as before. */
+        static int reported=-1;
+        if (reported<0) { const char *e=getenv("GOW3_AUDIO_PORT_CHANNELS"); reported=e && e[0]=='2' ? 2 : 8; }
+        state->output=0x01;
+        state->channel=(uint8_t)(p->channels>2 ? (reported==2 ? 2 : p->channels) : p->channels);
+        break;
+    }
     }
     return 0;
 }
