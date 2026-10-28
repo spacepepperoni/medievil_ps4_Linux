@@ -276,6 +276,7 @@ void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
         rasterizer.SignalAfterHostCopies([eop] { SignalEop(eop); });
     } else {
         // Labels are written in order: not before the ones deferred to the recording thread.
+        Gow3Stats::WaitSite site{Gow3Stats::SiteEop};
         rasterizer.WaitHostCopies();
         rasterizer.WaitDeferredSignals();
         SignalEop(eop);
@@ -306,6 +307,7 @@ void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
     if (Vulkan::DrawPipe::OnStageB() && !Gow3Toggle::Disabled(Gow3Toggle::RecorderFences)) {
         rasterizer.SignalAfterHostCopies([fence] { SignalComputeFence(fence); });
     } else {
+        Gow3Stats::WaitSite site{Gow3Stats::SiteComputeFence};
         rasterizer.WaitHostCopies();
         rasterizer.WaitDeferredSignals();
         SignalComputeFence(fence);
@@ -355,6 +357,7 @@ void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
 }
 
 void SignalFlip(Vulkan::Rasterizer& rasterizer, const u8*) {
+    Gow3Stats::WaitSite site{Gow3Stats::SiteFlip};
     rasterizer.WaitDeferredSignals();
     Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip);
 }
@@ -364,6 +367,7 @@ void RunWriteData(Vulkan::Rasterizer& rasterizer, const u8* data) {
     const auto* write_data = reinterpret_cast<const PM4CmdWriteData*>(data);
     // Copies deferred to the recording thread, and fences deferred to it (RecorderFences),
     // precede writes the guest sees.
+    Gow3Stats::WaitSite site{Gow3Stats::SiteWriteData};
     rasterizer.WaitHostCopies();
     rasterizer.WaitDeferredSignals();
     Gow3WriteLog::Note(write_data->Address<u64>(), write_data->data,
@@ -375,6 +379,7 @@ void RunWriteData(Vulkan::Rasterizer& rasterizer, const u8* data) {
 void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
     const auto& event_eos = *reinterpret_cast<const PM4CmdEventWriteEos*>(data);
     // Copies deferred to the recording thread precede writes the guest sees.
+    Gow3Stats::WaitSite site{Gow3Stats::SiteEos};
     rasterizer.WaitHostCopies();
     rasterizer.WaitDeferredSignals();
     rasterizer.ProcessDownloadImages();
@@ -1647,6 +1652,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             // gow3: copies deferred to the recording thread precede writes the guest sees, and
             // so do graphics fences deferred to it (the pipe was drained before this packet).
             if (rasterizer) {
+                Gow3Stats::WaitSite site{Gow3Stats::SiteAscWriteData};
                 rasterizer->WaitHostCopies();
                 rasterizer->WaitDeferredSignals();
             }
@@ -1694,6 +1700,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             // gow3: copies deferred to the recording thread precede writes the guest sees, and
             // so do graphics fences deferred to it (the pipe was drained before this packet).
             if (rasterizer) {
+                Gow3Stats::WaitSite site{Gow3Stats::SiteAscReleaseMem};
                 rasterizer->WaitHostCopies();
                 rasterizer->WaitDeferredSignals();
             }

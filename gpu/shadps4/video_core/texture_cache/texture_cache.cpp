@@ -183,6 +183,7 @@ void TextureCache::ProcessDownloadImages() {
             return;
         }
         // Upload workers must finish reading RAM before these pages become inaccessible.
+        Gow3Stats::WaitSite site{Gow3Stats::SiteDownload};
         scheduler.WaitHostCopies();
         std::scoped_lock readback_lock{readback_mutex};
         RetireReadbacks();

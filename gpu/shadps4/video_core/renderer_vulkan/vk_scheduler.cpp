@@ -279,6 +279,7 @@ std::unique_ptr<RecordChunk> Scheduler::AcquireChunk() {
 
 void Scheduler::SignalAfterHostCopies(std::function<void()> signal) {
     if (!IsRecordingDeferred()) {
+        Gow3Stats::WaitSite site{Gow3Stats::SiteSignalInline};
         WaitHostCopies();
         signal();
         return;
@@ -301,6 +302,8 @@ void Scheduler::WaitDeferredSignals() {
         return;
     }
     Gow3Stats::WaitTimer timer{Gow3Stats::host_copies_wait_ns};
+    Gow3Stats::WaitTimer site_timer{Gow3Stats::site_wait_ns[Gow3Stats::wait_site]};
+    Gow3Stats::site_waits[Gow3Stats::wait_site].fetch_add(1, std::memory_order_relaxed);
     KickRecording(true);
     while (deferred_signals_done->load(std::memory_order_acquire) < issued) {
         // Helps the copy threads the signals wait for.
@@ -313,6 +316,8 @@ void Scheduler::WaitHostCopies() {
     if (host_copies_done.load(std::memory_order_acquire) < host_copies_issued) {
         Gow3Stats::WaitTimer timer{Gow3Stats::host_copies_wait_ns};
         Gow3Stats::host_copy_waits.fetch_add(1, std::memory_order_relaxed);
+        Gow3Stats::WaitTimer site_timer{Gow3Stats::site_wait_ns[Gow3Stats::wait_site]};
+        Gow3Stats::site_waits[Gow3Stats::wait_site].fetch_add(1, std::memory_order_relaxed);
         KickRecording(true);
         while (host_copies_done.load(std::memory_order_acquire) < host_copies_issued) {
             std::this_thread::yield();

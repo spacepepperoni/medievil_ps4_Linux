@@ -557,6 +557,22 @@ void VideoOutDriver::Flip(const Request& req) {
                         Gow3Stats::tick_wait_ns.exchange(0) / (window * 1e7),
                         frames ? double(Gow3Stats::reduced_draws.exchange(0)) / frames : 0.0,
                         frames ? double(Gow3Stats::scene_draws.exchange(0)) / frames : 0.0);
+            {
+                // Linux fork: the host copy waits by caller (Gow3Stats::WaitSite).
+                std::string sites;
+                for (int i = 0; i < Gow3Stats::SiteCount; ++i) {
+                    const u64 n = Gow3Stats::site_waits[i].exchange(0);
+                    const u64 ns = Gow3Stats::site_wait_ns[i].exchange(0);
+                    if (n) {
+                        sites += fmt::format("{}{} {:.1f}/frame {:.2f} ms/frame", sites.empty() ? "" : ", ",
+                                             Gow3Stats::wait_site_names[i], frames ? double(n) / frames : 0.0,
+                                             frames ? ns / 1e6 / frames : 0.0);
+                    }
+                }
+                if (!sites.empty()) {
+                    std::printf("Host copy waits: %s\n", sites.c_str());
+                }
+            }
             presenter->GetRasterizer().GetPipelineCache().ReportCompilerStats();
             Vulkan::WaitDiagnostics::Report();
             // Frame pacing: spread of the guest flip intervals (judder that the mean hides).
