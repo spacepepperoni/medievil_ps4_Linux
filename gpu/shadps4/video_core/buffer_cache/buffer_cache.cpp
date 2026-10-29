@@ -325,25 +325,32 @@ bool BufferCache::DownloadMapped(std::span<const std::pair<VAddr, VAddr>> ranges
         }
     }
     if (!scheduler.IsFree(tick)) {
-        // Off by default: the snapshot below read a protected guest page inside the fault
-        // handler, whose nested fault spun on pending_lock (MediEvil hung after the opening
-        // cinematic on the Steam Deck). GOW3_DEFER_DOWNLOADS=1: on, for tests.
+        // Guest memory is read through the backing view: a plain read of a protected page
+        // here, inside the fault handler, faulted again and spun on pending_lock (b22 hung
+        // after MediEvil's opening cinematic). Only for a CPU write: a read needs the data now.
+        // GOW3_DEFER_DOWNLOADS=0: wait for the submission instead.
         static const bool defer = [] {
             const char* env = std::getenv("GOW3_DEFER_DOWNLOADS");
-            return env && env[0] == '1';
+            return !(env && env[0] == '0');
         }();
-        // Guest pages are readable here unless readbacks are Precise (GPU data read-protected).
-        // Only for a CPU write: a CPU read needs the data now.
-        if (defer && for_write && EmulatorSettings.GetReadbacksMode() != GpuReadbacksMode::Precise) {
-            std::lock_guard lock{pending_lock};
+        if (defer && for_write) {
+            std::vector<PendingMerge> merges;
+            bool readable = true;
             for (const auto& [start, end] : ranges) {
                 PendingMerge merge{start, end, tick, std::vector<u8>(end - start)};
-                std::memcpy(merge.snapshot.data(), std::bit_cast<const u8*>(start), end - start);
-                pending_merges.push_back(std::move(merge));
+                readable &= memory->TryReadBacking(std::bit_cast<const void*>(start),
+                                                   merge.snapshot.data(), end - start);
+                merges.push_back(std::move(merge));
             }
-            has_pending_merges.store(true, std::memory_order_release);
-            Gow3Stats::buffer_downloads_deferred.fetch_add(1, std::memory_order_relaxed);
-            return true;
+            if (readable) {
+                std::lock_guard lock{pending_lock};
+                for (auto& merge : merges) {
+                    pending_merges.push_back(std::move(merge));
+                }
+                has_pending_merges.store(true, std::memory_order_release);
+                Gow3Stats::buffer_downloads_deferred.fetch_add(1, std::memory_order_relaxed);
+                return true;
+            }
         }
         Gow3Stats::WaitTimer timer{Gow3Stats::buffer_download_wait_ns};
         scheduler.Wait(tick);
@@ -399,7 +406,12 @@ void BufferCache::MergePending(PendingMerge& merge) {
     if (!gpu) {
         return; // cannot happen: DownloadMapped checked the mapping
     }
-    const u8* guest = std::bit_cast<const u8*>(merge.start);
+    // The guest bytes now, read through the backing view (pages may be protected).
+    std::vector<u8> current(size);
+    if (!memory->TryReadBacking(std::bit_cast<const void*>(merge.start), current.data(), size)) {
+        current = merge.snapshot;
+    }
+    const u8* guest = current.data();
     u64 i = 0;
     while (i < size) {
         const bool cpu_changed = guest[i] != merge.snapshot[i];
