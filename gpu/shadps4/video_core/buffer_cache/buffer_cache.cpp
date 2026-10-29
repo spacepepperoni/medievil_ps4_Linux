@@ -431,6 +431,17 @@ void BufferCache::MergePending(PendingMerge& merge) {
 }
 
 void BufferCache::RetirePendingMerges(bool wait) {
+    // Each check of a running submission asks the driver (an ioctl). This runs at every buffer
+    // binding while merges are pending: the draw recording thread spent ~13% of its time in
+    // those ioctls in MediEvil's heavy scenes. At most one look every 250 us.
+    if (!wait) {
+        static thread_local std::chrono::steady_clock::time_point next_poll{};
+        const auto now = std::chrono::steady_clock::now();
+        if (now < next_poll) {
+            return;
+        }
+        next_poll = now + std::chrono::microseconds(250);
+    }
     std::vector<PendingMerge> ready;
     {
         std::lock_guard lock{pending_lock};
