@@ -678,7 +678,14 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
         }();
         // Only with VK_EXT_image_2d_view_of_3d: without it a 2D view of a 3D image may only be a
         // render target, and older drivers (AMD Polaris, issue #18) keep the old path.
-        if (volume_views && instance.Is2dViewOf3dSupported() &&
+        // Linux fork: drawing into the slices (render target, storage) needs only
+        // image2DViewOf3D; sampling them needs sampler2DViewOf3D too. SteamOS's RADV has only
+        // the first, so the Steam Deck rebuilt and copied these volumes ~13 times a frame
+        // (~37 MB of copies a frame, MediEvil's Hilltop Mausoleum).
+        const bool view_ok = instance.Is2dViewOf3dSupported() ||
+                             (instance.Is2dViewOf3dImageSupported() &&
+                              binding != BindingType::Texture);
+        if (volume_views && view_ok &&
             cache_image.info.type == AmdGpu::ImageType::Color3D &&
             cache_image.info.props.is_volume && image_info.type != AmdGpu::ImageType::Color3D &&
             image_info.guest_size == cache_image.info.guest_size &&
@@ -1022,7 +1029,9 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
             // Cannot reuse this image as we need the exact requested format.
             image_id = {};
         } else if (image_resolved.info.resources < info.resources &&
-                   !(instance.Is2dViewOf3dSupported() && image_resolved.info.props.is_volume &&
+                   !((instance.Is2dViewOf3dSupported() ||
+                      (instance.Is2dViewOf3dImageSupported() && desc.type != BindingType::Texture)) &&
+                     image_resolved.info.props.is_volume &&
                      image_resolved.info.type == AmdGpu::ImageType::Color3D &&
                      info.type != AmdGpu::ImageType::Color3D &&
                      info.resources.layers <= image_resolved.info.size.depth &&

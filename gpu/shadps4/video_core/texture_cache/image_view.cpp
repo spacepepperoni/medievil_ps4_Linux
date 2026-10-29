@@ -98,9 +98,13 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
     }
     // gow3: without VK_EXT_image_2d_view_of_3d a 2D (array) view of a 3D image may only be a
     // render target (the sampled and storage usages were undefined behaviour: issue #18).
+    // Linux fork: with image2DViewOf3D alone (SteamOS RADV) storage use is allowed too.
     if (image.info.type == AmdGpu::ImageType::Color3D && info.type != AmdGpu::ImageType::Color3D &&
         !instance.Is2dViewOf3dSupported()) {
-        usage_ci.usage &= vk::ImageUsageFlagBits::eColorAttachment;
+        usage_ci.usage &= instance.Is2dViewOf3dImageSupported()
+                              ? (vk::ImageUsageFlagBits::eColorAttachment |
+                                 vk::ImageUsageFlagBits::eStorage)
+                              : vk::ImageUsageFlags{vk::ImageUsageFlagBits::eColorAttachment};
     }
     vk::ImageViewMinLodCreateInfoEXT min_lod_ci{};
     if (info.min_lod != 0 && instance.IsImageViewMinLodSupported()) {
