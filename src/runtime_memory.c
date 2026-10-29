@@ -886,6 +886,14 @@ int runtime_memory_write_backing(uintptr_t address, const void *data, uint64_t s
     read_unlock();
     return ok;
 }
+/* Linux fork: the host wrote guest memory (a file read): the GPU's copies of that range are
+ * stale. touch_for_write() before the read marks the pages, but the GPU could upload a page
+ * between that touch and the kernel's write and keep the old contents (MediEvil: level data
+ * read into memory the GPU had cached; random colours per run in the Hilltop Mausoleum). */
+void runtime_memory_note_host_write(const void *address, uint64_t size) {
+    GpuRange hook=hook_invalidate;
+    if (hook && size) hook((uintptr_t)address,size);
+}
 /* Linux fork: reads through the backing view (no fault on protected guest pages, so it is safe
  * inside a fault handler); 0 when part of the range has no backing. */
 int runtime_memory_read_backing(uintptr_t address, void *data, uint64_t size) {
