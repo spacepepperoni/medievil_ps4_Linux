@@ -103,7 +103,6 @@ void runtime_thread_attach_host(const char *name);
 /* Name of a guest thread handle, or NULL when it is not a live thread. */
 const char *runtime_thread_name(void *handle);
 uint64_t runtime_memory_flexible_available(void);
-void runtime_memory_note_host_write(const void *address, uint64_t size); /* Linux fork: file reads */
 uintptr_t runtime_extra_resolve(const char *name);
 void runtime_extra_report(void);
 unsigned char *runtime_image_base(void);
