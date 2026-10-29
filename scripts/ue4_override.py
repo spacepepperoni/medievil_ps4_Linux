@@ -236,7 +236,12 @@ QUALITY = {
     },
     'low': {
         'r.ShadowQuality': '1', 'r.Shadow.MaxCSMResolution': '1024', 'r.Shadow.MaxResolution': '512',
-        'r.Shadow.CSM.MaxCascades': '2', 'r.VolumetricFog': '0', 'r.AmbientOcclusionLevels': '0',
+        # Linux fork: volumetric fog stays on, on a coarser grid. Off, the levels' height fog
+        # drew its full inscattering colour without shadows: objects near the floor glowed pink
+        # and whole areas washed out (MediEvil's Hilltop Mausoleum, Steam Deck mode), normal
+        # again higher up. Defaults are 8 px cells and 128 slices.
+        'r.Shadow.CSM.MaxCascades': '2', 'r.VolumetricFog.GridPixelSize': '16',
+        'r.VolumetricFog.GridSizeZ': '64', 'r.AmbientOcclusionLevels': '0',
         'r.SSR.Quality': '0', 'r.MotionBlurQuality': '0', 'r.DepthOfFieldQuality': '0',
         'r.LensFlareQuality': '0', 'r.SceneColorFringeQuality': '0', 'r.BloomQuality': '2',
         'r.RefractionQuality': '0', 'r.ViewDistanceScale': '0.7', 'foliage.DensityScale': '0.6',
