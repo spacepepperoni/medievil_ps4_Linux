@@ -96,12 +96,12 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
             .value();
     // Linux fork: device-local memory the CPU can map (APUs such as the Steam Deck's offer it
     // in the same heap): GPU-written data is then read by the CPU directly (DownloadMapped).
-    // Off by default: from the build that turned it on, MediEvil's lighting went wrong (white
-    // patches, then pink and washed-out levels): the CPU got stale GPU data. GOW3_ARENA_MAPPED=1:
-    // on, for tests only.
+    // GOW3_ARENA_MAPPED=0: plain device-local memory and GPU copies as before. (On: with the
+    // deferred merges below, the only build with MediEvil's Hilltop Mausoleum lit correctly on
+    // the Steam Deck; every build with the old copy-back showed wrong light colours there.)
     {
         const char* env = std::getenv("GOW3_ARENA_MAPPED");
-        if (env && env[0] == '1') {
+        if (!(env && env[0] == '0')) {
             constexpr auto wanted = vk::MemoryPropertyFlagBits::eDeviceLocal |
                                     vk::MemoryPropertyFlagBits::eHostVisible |
                                     vk::MemoryPropertyFlagBits::eHostCoherent;
@@ -308,6 +308,10 @@ bool BufferCache::DownloadMapped(std::span<const std::pair<VAddr, VAddr>> ranges
             }
         }
     }
+    // Written in the submission still being recorded: it has to go first (the copy as before).
+    if (tick >= scheduler.CurrentTick()) {
+        return false;
+    }
     // Every range must be resident and mapped.
     for (const auto& [start, end] : ranges) {
         const u64 first_block = start >> block_shift;
@@ -326,12 +330,13 @@ bool BufferCache::DownloadMapped(std::span<const std::pair<VAddr, VAddr>> ranges
         // Guest memory is read through the backing view: a plain read of a protected page
         // here, inside the fault handler, faulted again and spun on pending_lock (b22 hung
         // after MediEvil's opening cinematic). Only for a CPU write: a read needs the data now.
-        // Off by default: the game reuses its memory (level loads), and a merge landing after
-        // that wrote old GPU bytes into the new contents (b30: an illegal shader instruction
-        // while MediEvil loaded a level). GOW3_DEFER_DOWNLOADS=1: on, for tests only.
+        // On by default, as in the build that lit MediEvil correctly on the Steam Deck (b28):
+        // the merge keeps bytes the CPU wrote meanwhile, where the old copy-back overwrote them
+        // with older GPU data. Not for the submission still being recorded (b29-b30 did that,
+        // and b30 hit an illegal shader instruction on a level load). GOW3_DEFER_DOWNLOADS=0: off.
         static const bool defer = [] {
             const char* env = std::getenv("GOW3_DEFER_DOWNLOADS");
-            return env && env[0] == '1';
+            return !(env && env[0] == '0');
         }();
         if (defer && for_write) {
             std::vector<PendingMerge> merges;
@@ -351,11 +356,6 @@ bool BufferCache::DownloadMapped(std::span<const std::pair<VAddr, VAddr>> ranges
                 Gow3Stats::buffer_downloads_deferred.fetch_add(1, std::memory_order_relaxed);
                 return true;
             }
-        }
-        // Written in the submission still being recorded: it has to go first (the copy as
-        // before). Deferred merges take it too (they wait until it is submitted and done).
-        if (tick >= scheduler.CurrentTick()) {
-            return false;
         }
         Gow3Stats::WaitTimer timer{Gow3Stats::buffer_download_wait_ns};
         scheduler.Wait(tick);
