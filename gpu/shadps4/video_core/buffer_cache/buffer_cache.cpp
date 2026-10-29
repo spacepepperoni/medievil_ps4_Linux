@@ -30,7 +30,9 @@
 namespace VideoCore {
 
 static constexpr size_t GDS_BUFFER_SIZE = 64_KB;
-static constexpr size_t STREAM_BUFFER_SIZE = 128_MB;
+// Linux fork: 384 MiB (was 128). MediEvil's Pumpkin Gorge (~6,000 draws a frame) filled it and
+// the draw recording thread waited for the GPU in Reserve ~36% of its time on the Deck's APU.
+static constexpr size_t STREAM_BUFFER_SIZE = 384_MB;
 
 static constexpr auto ARENA_USAGE =
     vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst |

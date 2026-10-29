@@ -21,7 +21,9 @@ class ConstantRing {
 public:
     // Linux fork (from the Uncharted Linux fork): 64 MiB (was 32). With the GPU a frame behind,
     // a full ring made every draw poll the driver (an ioctl) in Retire() on the Steam Deck.
-    static constexpr u64 Capacity = 64ull << 20;
+    // 256 MiB: MediEvil's Pumpkin Gorge (~6,000 draws a frame) still filled 64 MiB; the GPU
+    // thread then spent ~72% of its time in that ioctl (stack samples on the Deck's APU).
+    static constexpr u64 Capacity = 256ull << 20;
 
     ConstantRing(const Instance& instance, Scheduler& scheduler_)
         : scheduler{scheduler_},
