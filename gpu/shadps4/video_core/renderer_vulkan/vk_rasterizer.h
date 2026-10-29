@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <optional>
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -167,6 +168,8 @@ private:
     void PrepareRenderState(const GraphicsPipeline* pipeline);
     RenderState BeginRendering(const GraphicsPipeline* pipeline);
     RenderState BeginRenderingFull(const GraphicsPipeline* pipeline);
+    /// Linux fork: a stencil clear only over the clearing draw's scissor (see BeginRenderingFull).
+    void ApplyPendingStencilClear(const RenderState& state);
     /// gow3: a draw continuing the open render pass with the same inputs gets the same render
     /// state (RenderStateMemo); nothing can have broken the pass in between (barriers, copies and
     /// dispatches end it).
@@ -466,6 +469,7 @@ private:
     boost::container::static_vector<ImageDescCacheEntry*, Shader::NUM_IMAGES> image_binding_entries;
     bool fault_process_pending{};
     bool attachment_feedback_loop{};
+    std::optional<u32> pending_stencil_clear{};
     bool needs_barrier{};
     // gow3: two-stage draw pipeline (stage B state; the thread is the last member so it
     // stops first).

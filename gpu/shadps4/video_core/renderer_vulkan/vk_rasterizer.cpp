@@ -1137,6 +1137,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     UpdateDynamicState(pipeline, is_indexed);
     MarkPass(pipeline, state);
     scheduler.BeginRendering(state);
+    ApplyPendingStencilClear(state);
 
     const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
     const auto& fetch_shader = pipeline->GetFetchShader();
@@ -1273,6 +1274,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     UpdateDynamicState(pipeline, is_indexed);
     MarkPass(pipeline, state);
     scheduler.BeginRendering(state);
+    ApplyPendingStencilClear(state);
 
     ASSERT(stride == (is_indexed ? sizeof(VkDrawIndexedIndirectCommand)
                                  : sizeof(VkDrawIndirectCommand)));
@@ -2729,6 +2731,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
 }
 
 RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
+    pending_stencil_clear.reset();
     attachment_feedback_loop = false;
     using VulkanUpscalerTarget = TemporalUpscaler::Target;
     VulkanUpscalerTarget redirect{};
@@ -2900,8 +2903,10 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
 
         const bool has_stencil = image.info.props.has_stencil;
         // Stencil writes can be enabled while depth writes are off.
-        const bool stencil_write =
-            has_stencil && regs.depth_control.stencil_enable && !desc.view_info.is_storage;
+        // Linux fork: a stencil clear writes the stencil too (cleared inside the pass now).
+        const bool stencil_write = has_stencil &&
+                                   (regs.depth_control.stencil_enable || is_stencil_clear) &&
+                                   !desc.view_info.is_storage;
         const auto new_layout = desc.view_info.is_storage
                                     ? has_stencil ? vk::ImageLayout::eDepthStencilAttachmentOptimal
                                                   : vk::ImageLayout::eDepthAttachmentOptimal
@@ -2932,9 +2937,26 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
             attachment.depth_clear = is_depth_clear;
         }
         if (regs.depth_buffer.StencilValid()) {
-            attachment.clear_value[1] = is_stencil_clear ? regs.stencil_clear : 0u;
+            // Linux fork: a GNM stencil clear is a draw (DB_RENDER_CONTROL.STENCIL_CLEAR_ENABLE)
+            // and clears only what it covers, often one light's rectangle. As a render pass load
+            // clear it wiped the whole stencil buffer, also the bits other lights still read:
+            // shadows cut off along straight edges, flickering black shapes (MediEvil's Pumpkin
+            // Gorge on the Steam Deck; worse with r.Shadow.StencilOptimization=0, which clears
+            // more often). It is now cleared over the draw's scissor inside the pass
+            // (ApplyPendingStencilClear). GOW3_STENCIL_RECT_CLEAR=0: the whole buffer as before.
+            static const bool rect_clear = [] {
+                const char* env = std::getenv("GOW3_STENCIL_RECT_CLEAR");
+                return !(env && env[0] == '0');
+            }();
             attachment.has_stencil = true;
-            attachment.stencil_clear = is_stencil_clear;
+            if (is_stencil_clear && rect_clear && !reduced) {
+                pending_stencil_clear = regs.stencil_clear;
+                attachment.clear_value[1] = 0u;
+                attachment.stencil_clear = false;
+            } else {
+                attachment.clear_value[1] = is_stencil_clear ? regs.stencil_clear : 0u;
+                attachment.stencil_clear = is_stencil_clear;
+            }
         }
 
         if (reduced) {
@@ -3379,6 +3401,36 @@ void Rasterizer::UpdateViewportScissorState() const {
     auto& dynamic_state = scheduler.GetDynamicState();
     dynamic_state.SetViewports(viewports);
     dynamic_state.SetScissors(scissors);
+}
+
+void Rasterizer::ApplyPendingStencilClear(const RenderState& state) {
+    if (!pending_stencil_clear) {
+        return;
+    }
+    const u32 value = *pending_stencil_clear;
+    pending_stencil_clear.reset();
+    const auto& scissors = scheduler.GetDynamicState().scissors;
+    const s32 width = state.width, height = state.height;
+    vk::Rect2D rect{{0, 0}, {u32(width), u32(height)}};
+    if (!scissors.empty()) {
+        const s32 x0 = std::clamp(scissors[0].offset.x, 0, width);
+        const s32 y0 = std::clamp(scissors[0].offset.y, 0, height);
+        const s32 x1 = std::clamp(scissors[0].offset.x + s32(scissors[0].extent.width), x0, width);
+        const s32 y1 = std::clamp(scissors[0].offset.y + s32(scissors[0].extent.height), y0, height);
+        rect = vk::Rect2D{{x0, y0}, {u32(x1 - x0), u32(y1 - y0)}};
+    }
+    if (rect.extent.width == 0 || rect.extent.height == 0) {
+        return;
+    }
+    const u32 layers = std::max<u32>(state.num_layers, 1);
+    scheduler.Record([value, rect, layers](vk::CommandBuffer cmdbuf) {
+        const vk::ClearAttachment clear{
+            .aspectMask = vk::ImageAspectFlagBits::eStencil,
+            .clearValue = vk::ClearValue{.depthStencil = vk::ClearDepthStencilValue{0.0f, value}},
+        };
+        const vk::ClearRect clear_rect{.rect = rect, .baseArrayLayer = 0, .layerCount = layers};
+        cmdbuf.clearAttachments(clear, clear_rect);
+    });
 }
 
 vk::Pipeline Rasterizer::SquarePass(const GraphicsPipeline& pipeline) const {
