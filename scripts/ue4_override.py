@@ -252,10 +252,10 @@ QUALITY = {
 # Every shadowed point light redraws its surroundings six times, and the port's GPU thread keeps
 # 60 FPS up to about 2000 draws a frame; busy outdoor scenes reached 4000 (30 FPS) before.
 LOCAL_SHADOWS = {'ultra': (1024, 0.06), 'high': (1024, 0.08), 'console': (512, 0.1),
-                 'medium': (512, 0.12), 'low': (256, 0.1)}
-# Linux fork: low was 0.15. In Steam Deck mode (low) small lights near walls then cast no shadow
-# at all and lit what should be dark: white patches at the foot of banners and props (MediEvil,
-# indoor levels). 0.1 is the console value.
+                 'medium': (512, 0.12), 'low': (256, 0.15)}
+# Linux fork: 0.1 for low (more small lights shadowed) turned a whole MediEvil level (the Hilltop
+# Mausoleum) bright pink in Steam Deck mode: those lights' shadows come out inverted (also the
+# white patches at the foot of banners). Back to 0.15 until the inversion is found.
 # Sun/moon shadow cascades and distance per preset (each cascade redraws the scene once).
 SUN_SHADOWS = {'ultra': ('3', '1.5'), 'high': ('3', '1.2'), 'console': ('2', '0.8'),
                'medium': ('2', '0.75'), 'low': ('2', '0.6')}
