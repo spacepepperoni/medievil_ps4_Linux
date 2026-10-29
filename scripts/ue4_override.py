@@ -379,12 +379,6 @@ def apply(game, resolution='native', quality='console', fps=60, debug_menu=False
                        'r.Shadow.RadiusThreshold': str(threshold), 'r.Shadow.CacheWholeSceneShadows': '1'})
         cascades, distance = SUN_SHADOWS[quality]
         values.update({'r.Shadow.CSM.MaxCascades': cascades, 'r.Shadow.DistanceScale': distance})
-    # Linux fork: GOW3_UE4_CVARS="name=value;name=value" adds or overrides console variables
-    # (diagnostics through the launcher's extra-env.txt).
-    for item in os.environ.get('GOW3_UE4_CVARS', '').split(';'):
-        name, sep, value = item.strip().partition('=')
-        if sep and name:
-            values[name.strip()] = value.strip()
     percentage = SCREEN_PERCENTAGE.get(resolution)
     if percentage:
         values['r.ScreenPercentage'] = percentage
@@ -397,6 +391,13 @@ def apply(game, resolution='native', quality='console', fps=60, debug_menu=False
     aa_quality = None if scale else ANTI_ALIASING.get(aa)
     if aa_quality is not None:
         values['r.PostProcessAAQuality'] = aa_quality
+    # Linux fork: GOW3_UE4_CVARS="name=value;name=value" adds or overrides console variables, last, so
+    # it also overrides the resolution and anti-aliasing values above
+    # (diagnostics through the launcher's extra-env.txt).
+    for item in os.environ.get('GOW3_UE4_CVARS', '').split(';'):
+        name, sep, value = item.strip().partition('=')
+        if sep and name:
+            values[name.strip()] = value.strip()
     engine = frame_rate_range(fps) if fps > 60 else {}
     # Linux fork: GOW3_FIXED_FRAME_RATE=30 (recording or replaying inputs for testing): the game
     # advances exactly 1/30 s per frame, so a replay simulates the same as the recording did,
