@@ -324,10 +324,12 @@ bool BufferCache::DownloadMapped(std::span<const std::pair<VAddr, VAddr>> ranges
         // Guest memory is read through the backing view: a plain read of a protected page
         // here, inside the fault handler, faulted again and spun on pending_lock (b22 hung
         // after MediEvil's opening cinematic). Only for a CPU write: a read needs the data now.
-        // GOW3_DEFER_DOWNLOADS=0: wait for the submission instead.
+        // Off by default: the game reuses its memory (level loads), and a merge landing after
+        // that wrote old GPU bytes into the new contents (b30: an illegal shader instruction
+        // while MediEvil loaded a level). GOW3_DEFER_DOWNLOADS=1: on, for tests only.
         static const bool defer = [] {
             const char* env = std::getenv("GOW3_DEFER_DOWNLOADS");
-            return !(env && env[0] == '0');
+            return env && env[0] == '1';
         }();
         if (defer && for_write) {
             std::vector<PendingMerge> merges;
