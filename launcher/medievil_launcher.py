@@ -429,6 +429,15 @@ def game_environment(s):
         pass
     env['PYTHONUNBUFFERED'] = '1'
     env['PYTHONIOENCODING'] = 'utf-8'
+    # Linux fork: extra-env.txt beside settings.json, KEY=VALUE per line (# comments), for
+    # diagnostics without a new build (e.g. GOW3_UE4_CVARS=r.VolumetricFog.GridPixelSize=8;...).
+    try:
+        for line in (CONFIG_DIR / 'extra-env.txt').read_text(encoding='utf-8').splitlines():
+            key, sep, value = line.strip().partition('=')
+            if sep and key and not key.startswith('#'):
+                env[key.strip()] = value.strip()
+    except OSError:
+        pass
     return env
 
 

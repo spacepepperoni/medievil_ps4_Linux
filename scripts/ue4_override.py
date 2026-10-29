@@ -376,6 +376,12 @@ def apply(game, resolution='native', quality='console', fps=60, debug_menu=False
                        'r.Shadow.RadiusThreshold': str(threshold), 'r.Shadow.CacheWholeSceneShadows': '1'})
         cascades, distance = SUN_SHADOWS[quality]
         values.update({'r.Shadow.CSM.MaxCascades': cascades, 'r.Shadow.DistanceScale': distance})
+    # Linux fork: GOW3_UE4_CVARS="name=value;name=value" adds or overrides console variables
+    # (diagnostics through the launcher's extra-env.txt).
+    for item in os.environ.get('GOW3_UE4_CVARS', '').split(';'):
+        name, sep, value = item.strip().partition('=')
+        if sep and name:
+            values[name.strip()] = value.strip()
     percentage = SCREEN_PERCENTAGE.get(resolution)
     if percentage:
         values['r.ScreenPercentage'] = percentage
