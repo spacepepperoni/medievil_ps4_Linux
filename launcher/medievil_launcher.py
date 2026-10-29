@@ -382,6 +382,8 @@ def game_environment(s):
     env['GOW3_PARALLEL_WARMUP'] = '1' if s.get('parallel_warmup', True) else '0'
     env['GOW3_PIPELINE_BINARIES'] = '1' if s.get('pipeline_binary_cache', True) else '0'
     env.setdefault('GOW3_PERF_DIAG', '1' if s.get('perf_diag', False) else '0')
+    if s.get('perf_diag', False):  # Linux fork: which images are created and uploaded each frame
+        env.setdefault('GOW3_IMAGE_STATS', '1')
     for key, name in (('frame_stats', 'GOW3_FRAME_STATS'), ('gpu_profile', 'GOW3_GPU_PROFILE'),
                       ('vk_validation', 'GOW3_VK_VALIDATION'), ('frame_capture_key', 'GOW3_FRAME_CAPTURE_KEY')):
         if s[key]:
