@@ -405,12 +405,11 @@ def apply(game, resolution='native', quality='console', fps=60, debug_menu=False
     physics = {}
     if fixed.isdigit() and int(fixed) > 0:
         engine.update({'bUseFixedFrameRate': 'True', 'FixedFrameRate': f'{int(fixed)}.000000'})
-        # Linux fork: below 60 the physics advances in 60 Hz substeps, as at the original frame
-        # rate: in 30 Hz steps the glowing wisp that follows the hero zigzagged (its trail went
-        # back and forth), mostly on stairs and slopes.
-        # GOW3_PHYSICS_SUBSTEPS=0 (launcher extra-env.txt): no substeps, for tests (MediEvil:
-        # hologram dragons wandering off their path between the cornfields).
-        if int(fixed) < 60 and os.environ.get('GOW3_PHYSICS_SUBSTEPS', '1') != '0':
+        # Linux fork: GOW3_PHYSICS_SUBSTEPS=1 (launcher extra-env.txt): below 60 the physics
+        # advances in 60 Hz substeps. Off by default: it did not stop the wisp that follows the
+        # hero from zigzagging, and is the first suspect for MediEvil's hologram dragons
+        # wandering off their path between the cornfields.
+        if int(fixed) < 60 and os.environ.get('GOW3_PHYSICS_SUBSTEPS', '0') == '1':
             physics = {'bSubstepping': 'True', 'MaxSubstepDeltaTime': '0.016667', 'MaxSubsteps': '4'}
     # Linux fork: Xbox or Steam Deck button pictures (button_prompts.py).
     import button_prompts
