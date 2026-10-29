@@ -168,13 +168,16 @@ def set_section(text, section, values):
     return head + sep + '\n'.join(body + lines[section_end:])
 
 
-def set_values(ini, values, engine=None):
-    """Sets keys in [SystemSettings] (console variables) and [/Script/Engine.Engine]."""
+def set_values(ini, values, engine=None, physics=None):
+    """Sets keys in [SystemSettings] (console variables), [/Script/Engine.Engine] and
+    [/Script/Engine.PhysicsSettings]."""
     text = ini.decode('utf-8-sig').replace('\r\n', '\n')
     if values:
         text = set_section(text, 'SystemSettings', values)
     if engine:
         text = set_section(text, '/Script/Engine.Engine', engine)
+    if physics:
+        text = set_section(text, '/Script/Engine.PhysicsSettings', physics)
     return text.replace('\n', '\r\n').encode('utf-8')
 
 
@@ -249,7 +252,10 @@ QUALITY = {
 # Every shadowed point light redraws its surroundings six times, and the port's GPU thread keeps
 # 60 FPS up to about 2000 draws a frame; busy outdoor scenes reached 4000 (30 FPS) before.
 LOCAL_SHADOWS = {'ultra': (1024, 0.06), 'high': (1024, 0.08), 'console': (512, 0.1),
-                 'medium': (512, 0.12), 'low': (256, 0.15)}
+                 'medium': (512, 0.12), 'low': (256, 0.1)}
+# Linux fork: low was 0.15. In Steam Deck mode (low) small lights near walls then cast no shadow
+# at all and lit what should be dark: white patches at the foot of banners and props (MediEvil,
+# indoor levels). 0.1 is the console value.
 # Sun/moon shadow cascades and distance per preset (each cascade redraws the scene once).
 SUN_SHADOWS = {'ultra': ('3', '1.5'), 'high': ('3', '1.2'), 'console': ('2', '0.8'),
                'medium': ('2', '0.75'), 'low': ('2', '0.6')}
@@ -382,8 +388,14 @@ def apply(game, resolution='native', quality='console', fps=60, debug_menu=False
     # advances exactly 1/30 s per frame, so a replay simulates the same as the recording did,
     # whatever the machine's frame times.
     fixed = os.environ.get('GOW3_FIXED_FRAME_RATE', '')
+    physics = {}
     if fixed.isdigit() and int(fixed) > 0:
         engine.update({'bUseFixedFrameRate': 'True', 'FixedFrameRate': f'{int(fixed)}.000000'})
+        # Linux fork: below 60 the physics advances in 60 Hz substeps, as at the original frame
+        # rate: in 30 Hz steps the glowing wisp that follows the hero zigzagged (its trail went
+        # back and forth), mostly on stairs and slopes.
+        if int(fixed) < 60:
+            physics = {'bSubstepping': 'True', 'MaxSubstepDeltaTime': '0.016667', 'MaxSubsteps': '4'}
     # Linux fork: Xbox or Steam Deck button pictures (button_prompts.py).
     import button_prompts
     try:
@@ -391,10 +403,10 @@ def apply(game, resolution='native', quality='console', fps=60, debug_menu=False
     except (OSError, ValueError, ImportError) as error:
         print(f'Button pictures: PlayStation ({error})', flush=True)
         pictures = {}
-    if not values and not engine and not debug_menu and not infinite_ammo and not pictures:
+    if not values and not engine and not physics and not debug_menu and not infinite_ammo and not pictures:
         pak.unlink(missing_ok=True)
         return 'native 1080p, console quality, 60 FPS'
-    files = {CONFIG: set_values(read_file(game, CONFIG), values, engine)}
+    files = {CONFIG: set_values(read_file(game, CONFIG), values, engine, physics)}
     # Native output: the base PS4 renderer makes its buffers at the display size at start and only
     # a live r.SetRes changes them; the runtime sets it (GOW3_UE4_SETRES), and the debug menu's
     # first resolution button follows the setting.
