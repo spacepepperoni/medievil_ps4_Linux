@@ -96,10 +96,12 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
             .value();
     // Linux fork: device-local memory the CPU can map (APUs such as the Steam Deck's offer it
     // in the same heap): GPU-written data is then read by the CPU directly (DownloadMapped).
-    // GOW3_ARENA_MAPPED=0: plain device-local memory and GPU copies as before.
+    // Off by default: from the build that turned it on, MediEvil's lighting went wrong (white
+    // patches, then pink and washed-out levels): the CPU got stale GPU data. GOW3_ARENA_MAPPED=1:
+    // on, for tests only.
     {
         const char* env = std::getenv("GOW3_ARENA_MAPPED");
-        if (!(env && env[0] == '0')) {
+        if (env && env[0] == '1') {
             constexpr auto wanted = vk::MemoryPropertyFlagBits::eDeviceLocal |
                                     vk::MemoryPropertyFlagBits::eHostVisible |
                                     vk::MemoryPropertyFlagBits::eHostCoherent;
