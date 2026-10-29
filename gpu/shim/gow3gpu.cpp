@@ -114,7 +114,11 @@ static void CopySparseSerial(VAddr source, u8* dest, u64 size) {
             end = source + size;
         }
         const u64 n = std::min<u64>(size, end - source);
-        if (mapped) std::memcpy(dest, reinterpret_cast<const void*>(source), n);
+        // Linux fork: through the backing view, under the region lock: a copy thread reading
+        // the guest mapping directly crashed when the page was protected or the game released
+        // it meanwhile (MediEvil, as a cinematic ended: signal 11 in CopySparseMemory).
+        if (mapped && runtime_memory_read_backing(source, dest, n)) {
+        } else if (mapped) std::memcpy(dest, reinterpret_cast<const void*>(source), n);
         else std::memset(dest, 0, n);
         source += n; dest += n; size -= n;
     }

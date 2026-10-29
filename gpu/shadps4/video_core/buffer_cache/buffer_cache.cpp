@@ -306,10 +306,6 @@ bool BufferCache::DownloadMapped(std::span<const std::pair<VAddr, VAddr>> ranges
             }
         }
     }
-    // Written in the submission still being recorded: it has to go first (the copy as before).
-    if (tick >= scheduler.CurrentTick()) {
-        return false;
-    }
     // Every range must be resident and mapped.
     for (const auto& [start, end] : ranges) {
         const u64 first_block = start >> block_shift;
@@ -351,6 +347,11 @@ bool BufferCache::DownloadMapped(std::span<const std::pair<VAddr, VAddr>> ranges
                 Gow3Stats::buffer_downloads_deferred.fetch_add(1, std::memory_order_relaxed);
                 return true;
             }
+        }
+        // Written in the submission still being recorded: it has to go first (the copy as
+        // before). Deferred merges take it too (they wait until it is submitted and done).
+        if (tick >= scheduler.CurrentTick()) {
+            return false;
         }
         Gow3Stats::WaitTimer timer{Gow3Stats::buffer_download_wait_ns};
         scheduler.Wait(tick);
