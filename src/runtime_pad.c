@@ -16,6 +16,11 @@
 #include <time.h>
 #include <SDL3/SDL.h>
 #include <sys/stat.h>
+#ifdef __linux__
+#include <fcntl.h>
+#include <poll.h>
+#include <unistd.h>
+#endif
 
 #define ERR_INVALID_ARG ((int32_t)0x80920001)
 #define ERR_INVALID_HANDLE ((int32_t)0x80920003)
@@ -220,6 +225,101 @@ static uint32_t gamepad_buttons(void) {
             if (SDL_GetGamepadButton(gamepads[p],(SDL_GamepadButton)pad_map.entries[i].source)) buttons|=pad_map.entries[i].ps;
     return buttons;
 }
+/* Linux fork: both back grips held (Steam Deck L4+R4, SDL's paddles), the recording toggle. */
+static int back_grips_down(void) {
+    for (int p=0;p<gamepad_count;++p)
+        if (SDL_GetGamepadButton(gamepads[p],SDL_GAMEPAD_BUTTON_LEFT_PADDLE1) &&
+            SDL_GetGamepadButton(gamepads[p],SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1)) return 1;
+    return 0;
+}
+/* Linux fork: R4 alone (or F10) writes a marker into the log, so a player can flag the moment a
+ * glitch shows ("MARK n"), with the frame position and, under gamescope, a screenshot in
+ * <user dir>/marks/. Games started from Steam see Steam's virtual controller, which has no back
+ * grips, so on a Steam Deck R4 is also read straight from the controller's hidraw device
+ * (28de:1205; reports are delivered to every reader, Steam keeps its own). */
+static volatile int deck_r4_down;
+#ifdef __linux__
+static void *deck_grip_thread(void *arg) {
+    (void)arg;
+    int fds[8], count=0;
+    for (int n=0;n<32 && count<8;++n) {
+        char path[96], line[256]; int match=0;
+        snprintf(path,sizeof(path),"/sys/class/hidraw/hidraw%d/device/uevent",n);
+        FILE *f=fopen(path,"r");
+        if (!f) continue;
+        while (fgets(line,sizeof(line),f)) if (strstr(line,"HID_ID=0003:000028DE:00001205")) match=1;
+        fclose(f);
+        if (!match) continue;
+        snprintf(path,sizeof(path),"/dev/hidraw%d",n);
+        const int fd=open(path,O_RDONLY);
+        if (fd>=0) fds[count++]=fd;
+    }
+    if (!count) return NULL;
+    printf("Runtime: R4 marks the log (read from %d Steam Deck controller device%s)\n",count,count>1 ? "s" : "");
+    struct pollfd p[8];
+    for (int i=0;i<count;++i) p[i]=(struct pollfd){fds[i],POLLIN,0};
+    unsigned char buf[64];
+    while (count) {
+        if (poll(p,count,-1)<0) continue;
+        for (int i=0;i<count;++i) {
+            if (!(p[i].revents & POLLIN)) { if (p[i].revents & (POLLERR|POLLHUP|POLLNVAL)) p[i].fd=-1; continue; }
+            const ssize_t r=read(p[i].fd,buf,sizeof(buf));
+            if (r==64 && buf[0]==1 && buf[1]==0 && buf[2]==9 && buf[3]==64) {
+                uint32_t high; memcpy(&high,buf+12,4);
+                deck_r4_down=(high & 0x400)!=0; /* STEAMDECK_HBUTTON_R4 */
+            }
+        }
+    }
+    return NULL;
+}
+#endif
+static int marker_down(void) {
+    static int started;
+    if (!started) {
+        started=1;
+#ifdef __linux__
+        pthread_t t;
+        if (!pthread_create(&t,NULL,deck_grip_thread,NULL)) pthread_detach(t);
+#endif
+    }
+    const bool *k=SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
+    if (k && k[SDL_SCANCODE_F10]) return 1;
+    if (deck_r4_down) return 1;
+    for (int p=0;p<gamepad_count;++p)
+        if (SDL_GetGamepadButton(gamepads[p],SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1) &&
+            !SDL_GetGamepadButton(gamepads[p],SDL_GAMEPAD_BUTTON_LEFT_PADDLE1)) return 1;
+    return 0;
+}
+static void marker_poll(void) {
+    static int was_down, count;
+    static uint64_t start;
+    if (!start) start=now_us();
+    const int down=marker_down();
+    if (down && !was_down) {
+        uint32_t segment, frame; gow3gpu_frame_position(&segment,&frame);
+        time_t now=time(NULL); struct tm tm;
+#ifdef _WIN32
+        localtime_s(&tm,&now);
+#else
+        localtime_r(&now,&tm);
+#endif
+        ++count;
+        printf("MARK %d: %02d:%02d:%02d, %.1f s into the session, segment %u frame %u (the player pressed R4/F10)\n",
+               count,tm.tm_hour,tm.tm_min,tm.tm_sec,(now_us()-start)/1e6,segment,frame);
+#ifndef _WIN32
+        if (getenv("GAMESCOPE_WAYLAND_DISPLAY")) {
+            char dir[4096], cmd[8400];
+            snprintf(dir,sizeof(dir),"%s/marks",runtime_file_user_dir());
+            mkdir(dir,0755);
+            snprintf(cmd,sizeof(cmd),"env -u LD_LIBRARY_PATH -u LD_PRELOAD gamescopectl screenshot '%s/mark-%04d%02d%02d-%02d%02d%02d-%d.png' >/dev/null 2>&1 &",
+                     dir,tm.tm_year+1900,tm.tm_mon+1,tm.tm_mday,tm.tm_hour,tm.tm_min,tm.tm_sec,count);
+            if (system(cmd)) {}
+        }
+#endif
+        fflush(stdout);
+    }
+    was_down=down;
+}
 /* GOW3_STICK_RANGE=<percent> (launcher: Stick range): that much tilt counts as a full push, for
  * sticks that never reach the edge (some hall-effect pads, issue #36). Default 100. */
 static int16_t stick_range(int16_t v) {
@@ -354,51 +454,123 @@ typedef struct { uint32_t ms, buttons; uint8_t axes[4], l2, r2; } PadSample;
 static FILE *record_file;
 static uint64_t record_start;
 static PadSample record_last;
+/* Linux fork: F9 or the Steam Deck's back grips L4+R4 together start and stop a recording, also
+ * without GOW3_PAD_RECORD: then each one goes to <user dir>/pad-recordings/route-<date>-<time>.txt,
+ * for the pyro test bench to replay. Games started from Steam see Steam's virtual controller,
+ * which hides the grips: bind L4 or R4 to the keyboard key F9 in the game's controller layout. */
+/* Linux fork: GOW3_PAD_RECORD_AUTO=1 (the launcher's "Record my inputs for testing") records the
+ * whole session from the first frame, frame-stamped ("# v2": segment, frame within it, then the
+ * pad state), so the pyro test bench replays it frame for frame and re-synchronises after every
+ * load (gow3gpu_frame_position). */
+static int record_v2;
 static void record_sample(const PadData *d) {
-    static const char *path; static int checked, f9_was_down;
-    if (!checked) { path=getenv("GOW3_PAD_RECORD"); checked=1; }
-    if (!path || !*path || !sdl_ready) return;
+    static const char *env_path; static int checked, f9_was_down, sticks_were_down, auto_mode;
+    static char path[4096];
+    if (!checked) {
+        env_path=getenv("GOW3_PAD_RECORD"); checked=1;
+        const char *a=getenv("GOW3_PAD_RECORD_AUTO"); auto_mode=a && a[0]=='1';
+    }
+    if (!sdl_ready) return;
     const bool *k=SDL_GetKeyboardState(NULL);
     const int f9=k && k[SDL_SCANCODE_F9];
-    if (f9 && !f9_was_down) {
+    const int sticks=back_grips_down();
+    const int auto_start=auto_mode==1;
+    if (auto_start) auto_mode=2;
+    if (auto_start || (f9 && !f9_was_down) || (sticks && !sticks_were_down)) {
         if (record_file) {
             fclose(record_file); record_file=NULL;
             printf("Runtime: pad recording stopped (%s)\n",path);
-        } else if ((record_file=fopen(path,"w"))) {
-            record_start=now_us();
-            memset(&record_last,0xff,sizeof(record_last));
-            printf("Runtime: pad recording started (%s, F9 stops)\n",path);
+        } else {
+            if (env_path && *env_path) snprintf(path,sizeof(path),"%s",env_path);
+            else {
+                char dir[4096]; time_t now=time(NULL); struct tm tm;
+                snprintf(dir,sizeof(dir),"%s/pad-recordings",runtime_file_user_dir());
+#ifdef _WIN32
+                localtime_s(&tm,&now); mkdir(dir);
+#else
+                localtime_r(&now,&tm); mkdir(dir,0755);
+#endif
+                snprintf(path,sizeof(path),"%s/route-%04d%02d%02d-%02d%02d%02d.txt",dir,tm.tm_year+1900,
+                         tm.tm_mon+1,tm.tm_mday,tm.tm_hour,tm.tm_min,tm.tm_sec);
+            }
+            if ((record_file=fopen(path,"w"))) {
+                record_start=now_us();
+                memset(&record_last,0xff,sizeof(record_last));
+                record_v2=auto_start;
+                if (record_v2) fputs("# v2 segment frame buttons lx ly rx ry l2 r2\n",record_file);
+                printf("Runtime: pad recording started (%s, F9 or L4+R4 stops)\n",path);
+            }
         }
     }
     f9_was_down=f9;
+    sticks_were_down=sticks;
     if (!record_file) return;
     PadSample s={(uint32_t)((now_us()-record_start)/1000),d->buttons,
                  {d->left_x,d->left_y,d->right_x,d->right_y},d->l2,d->r2};
     if (s.buttons==record_last.buttons && !memcmp(s.axes,record_last.axes,4) &&
         s.l2==record_last.l2 && s.r2==record_last.r2) return;
     record_last=s;
-    fprintf(record_file,"%u %u %u %u %u %u %u %u\n",s.ms,s.buttons,s.axes[0],s.axes[1],s.axes[2],
-            s.axes[3],s.l2,s.r2);
+    if (record_v2) {
+        uint32_t segment, frame; gow3gpu_frame_position(&segment,&frame);
+        fprintf(record_file,"%u %u %u %u %u %u %u %u %u\n",segment,frame,s.buttons,s.axes[0],s.axes[1],
+                s.axes[2],s.axes[3],s.l2,s.r2);
+    } else
+        fprintf(record_file,"%u %u %u %u %u %u %u %u\n",s.ms,s.buttons,s.axes[0],s.axes[1],s.axes[2],
+                s.axes[3],s.l2,s.r2);
     fflush(record_file);
 }
 static PadSample *replay; static size_t replay_count, replay_next;
-static void replay_sample(PadData *d) {
-    if (!replay_armed) return;
-    if (!replay_start) {
-        static int loaded;
-        if (!loaded) {
-            loaded=1;
-            const char *path=getenv("GOW3_PAD_REPLAY");
-            FILE *f=path ? fopen(path,"r") : NULL;
-            PadSample s; unsigned v[8]; size_t cap=0;
-            while (f && fscanf(f,"%u %u %u %u %u %u %u %u",&v[0],&v[1],&v[2],&v[3],&v[4],&v[5],&v[6],&v[7])==8) {
-                s=(PadSample){v[0],v[1],{(uint8_t)v[2],(uint8_t)v[3],(uint8_t)v[4],(uint8_t)v[5]},(uint8_t)v[6],(uint8_t)v[7]};
-                if (replay_count==cap && !(replay=realloc(replay,(cap=cap ? cap*2 : 1024)*sizeof(*replay)))) break;
-                replay[replay_count++]=s;
-            }
-            if (f) fclose(f);
-            printf("Runtime: pad replay of %zu samples from %s\n",replay_count,path ? path : "(unset)");
+static uint32_t *replay_segment; /* Linux fork: v2 recordings, the segment of each sample (ms = frame) */
+static int replay_v2;
+static void replay_load(void) {
+    static int loaded;
+    if (loaded) return;
+    loaded=1;
+    const char *path=getenv("GOW3_PAD_REPLAY");
+    FILE *f=path ? fopen(path,"r") : NULL;
+    char line[256]; size_t cap=0;
+    while (f && fgets(line,sizeof(line),f)) {
+        if (!strncmp(line,"# v2",4)) { replay_v2=1; continue; }
+        unsigned v[9]; PadSample s; uint32_t seg=0;
+        if (replay_v2) {
+            if (sscanf(line,"%u %u %u %u %u %u %u %u %u",&v[0],&v[1],&v[2],&v[3],&v[4],&v[5],&v[6],&v[7],&v[8])!=9) continue;
+            seg=v[0];
+            s=(PadSample){v[1],v[2],{(uint8_t)v[3],(uint8_t)v[4],(uint8_t)v[5],(uint8_t)v[6]},(uint8_t)v[7],(uint8_t)v[8]};
+        } else {
+            if (sscanf(line,"%u %u %u %u %u %u %u %u",&v[0],&v[1],&v[2],&v[3],&v[4],&v[5],&v[6],&v[7])!=8) continue;
+            s=(PadSample){v[0],v[1],{(uint8_t)v[2],(uint8_t)v[3],(uint8_t)v[4],(uint8_t)v[5]},(uint8_t)v[6],(uint8_t)v[7]};
         }
+        if (replay_count==cap) {
+            cap=cap ? cap*2 : 1024;
+            PadSample *r=realloc(replay,cap*sizeof(*replay)); uint32_t *g=realloc(replay_segment,cap*sizeof(*g));
+            if (!r || !g) { free(r); free(g); replay=NULL; replay_segment=NULL; replay_count=0; break; }
+            replay=r; replay_segment=g;
+        }
+        replay_segment[replay_count]=seg; replay[replay_count++]=s;
+    }
+    if (f) fclose(f);
+    printf("Runtime: pad replay of %zu samples from %s%s\n",replay_count,path ? path : "(unset)",
+           replay_v2 ? " (frame-stamped, starts by itself)" : "");
+    if (replay_v2 && replay_count) replay_armed=1;
+}
+static void replay_sample(PadData *d) {
+    if (!replay_armed && getenv("GOW3_PAD_REPLAY")) replay_load();
+    if (!replay_armed) return;
+    if (replay_v2) {
+        uint32_t segment, frame; gow3gpu_frame_position(&segment,&frame);
+        while (replay_next<replay_count && (replay_segment[replay_next]<segment ||
+               (replay_segment[replay_next]==segment && replay[replay_next].ms<=frame))) ++replay_next;
+        if (!replay_next) return;
+        if (replay_next==replay_count && replay_armed==1) { puts("Runtime: pad replay finished"); replay_armed=2; }
+        if (replay_armed==2) return;
+        const PadSample *s=&replay[replay_next-1];
+        d->buttons=s->buttons;
+        d->left_x=s->axes[0]; d->left_y=s->axes[1]; d->right_x=s->axes[2]; d->right_y=s->axes[3];
+        d->l2=s->l2; d->r2=s->r2;
+        return;
+    }
+    if (!replay_start) {
+        replay_load();
         replay_start=now_us();
         replay_next=0;
     }
@@ -448,6 +620,7 @@ static void sample(PadData *d) {
     sample_host(d);
     if (gow3gpu_overlay_captures_input()) { hold_after_capture=1; return; }
     record_sample(d);
+    if (sdl_ready>0) marker_poll();
     read_inject();
     replay_sample(d);
     d->buttons|=injected.buttons;

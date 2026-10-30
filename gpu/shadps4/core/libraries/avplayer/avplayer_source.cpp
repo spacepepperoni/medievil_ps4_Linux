@@ -11,6 +11,9 @@
 #include "core/memory.h"
 
 #include <magic_enum/magic_enum.hpp>
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -24,6 +27,8 @@ extern "C" {
 #include "common/support/avdec.h"
 
 extern "C" int runtime_file_translate(const char* guest, char* out, size_t size);
+
+extern "C" void gow3gpu_movie_frame(void); // Linux fork: gow3gpu.cpp
 
 namespace Libraries::AvPlayer {
 
@@ -163,7 +168,12 @@ AvPlayerStreamInfo AvPlayerSource::CreateStreamInfo(u32 stream_index) {
     }
     case AvPlayerStreamType::Audio: {
         LOG_INFO(Lib_AvPlayer, "Stream {} is an audio stream.", stream_index);
-        info.details.audio.channel_count = p_stream->codecpar->ch_layout.nb_channels;
+        // Linux fork: never 0 channels. MediEvil divides an audio chunk's size by channels x 2
+        // (SIGFPE on the Steam Deck after finishing a level, while a movie played).
+        info.details.audio.channel_count = u16(std::max(1, p_stream->codecpar->ch_layout.nb_channels));
+        if (p_stream->codecpar->ch_layout.nb_channels <= 0) {
+            LOG_WARNING(Lib_AvPlayer, "audio stream without a channel count: reported as 1");
+        }
         info.details.audio.sample_rate = p_stream->codecpar->sample_rate;
         info.details.audio.size = 0; // sceAvPlayerGetStreamInfo() is expected to set this to 0
         if (p_lang_node != nullptr) {
@@ -313,6 +323,17 @@ bool AvPlayerSource::Stop() {
         m_up_data_streamer->Reset();
     }
 
+    // Linux fork: all three asked to stop first, then every queue they can sleep on woken, then
+    // joined. A decoder could miss the stop request's own wake-up (it came between its check and
+    // its wait) and sleep on: sceAvPlayerStop then hung the game, after the first level on the
+    // Steam Deck, until some signal woke that thread.
+    m_video_decoder_thread.RequestStop();
+    m_audio_decoder_thread.RequestStop();
+    m_demuxer_thread.RequestStop();
+    m_video_packets_cv.Notify();
+    m_audio_packets_cv.Notify();
+    m_video_buffers_cv.Notify();
+    m_audio_buffers_cv.Notify();
     m_video_decoder_thread.Stop();
     m_audio_decoder_thread.Stop();
     m_demuxer_thread.Stop();
@@ -332,6 +353,7 @@ bool AvPlayerSource::Stop() {
     m_start_time.reset();
     m_pause_time = {};
     m_pause_duration = {};
+    m_wall_pause = {};
 
     m_is_paused = false;
     m_is_eof = false;
@@ -346,6 +368,7 @@ void AvPlayerSource::Pause() {
 
 void AvPlayerSource::Resume() {
     m_pause_duration += std::chrono::high_resolution_clock::now() - m_pause_time;
+    m_wall_pause += std::chrono::high_resolution_clock::now() - m_pause_time;
     m_is_paused = false;
 }
 
@@ -375,7 +398,16 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
     const auto current_time = CurrentTime();
     const auto& new_frame = m_video_frames.Front();
     if (m_state.GetSyncMode() == AvPlayerAvSyncMode::Default) {
-        if (new_frame.info.timestamp > current_time) {
+        // Linux fork: a frame is due up to half a 30 FPS frame early. Only at or after its
+        // time, a 30 FPS game asking for a 30 FPS movie found the next frame a hair early now
+        // and then, showed the last one again and caught up later: jittery cutscenes in Steam
+        // Deck mode. GOW3_MOVIE_EARLY_MS (default 16, 0 = only when due).
+        static const s64 early_ms = [] {
+            const char* env = std::getenv("GOW3_MOVIE_EARLY_MS");
+            return env ? std::max(0, std::atoi(env)) : 16;
+        }();
+        if (s64(new_frame.info.timestamp) > s64(current_time) + early_ms) {
+            MovieStats(false, 0, 0);
             return false;
         }
     }
@@ -387,10 +419,67 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
     }
 
     auto frame = m_video_frames.Pop();
+    // Linux fork: a frame more than two frames behind the clock is skipped while the next one is
+    // due too, so a movie that started late catches up instead of staying behind its sound.
+    // GOW3_MOVIE_CATCHUP=0 shows every frame.
+    static const bool catch_up = [] {
+        const char* env = std::getenv("GOW3_MOVIE_CATCHUP");
+        return !(env && env[0] == '0');
+    }();
+    u32 skipped = 0;
+    while (catch_up && m_state.GetSyncMode() == AvPlayerAvSyncMode::Default &&
+           s64(current_time) - s64(frame->info.timestamp) > 67 && m_video_frames.Size() > 0 &&
+           s64(m_video_frames.Front().info.timestamp) <= s64(current_time)) {
+        m_video_buffers.Push(std::move(frame->buffer));
+        m_video_buffers_cv.Notify();
+        frame = m_video_frames.Pop();
+        ++skipped;
+    }
     video_info = frame->info;
+    MovieStats(true, s64(current_time) - s64(frame->info.timestamp), skipped);
 
     m_current_video_frame = std::move(frame);
+    // Linux fork: a movie is playing (its frames come here, not through sceVideodec): a frame
+    // limit below 60 steps aside meanwhile, so the 30 FPS movies are sampled twice per frame
+    // instead of beating against a 30 FPS game (gow3gpu.cpp, videoout driver).
+    gow3gpu_movie_frame();
     return true;
+}
+
+// Linux fork: GOW3_FRAME_STATS=1 prints every 5 s how evenly movie frames reached the game:
+// frames handed out, polls that found none due (the last frame shown again) and late frames.
+void AvPlayerSource::MovieStats(bool shown, s64 late_ms, u32 skipped_now) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_FRAME_STATS");
+        return env && env[0] == '1';
+    }();
+    if (!enabled) {
+        return;
+    }
+    static std::mutex mutex;
+    static u32 frames, repeats, late, skipped;
+    static s64 lag_sum;
+    static auto window = std::chrono::steady_clock::now();
+    std::scoped_lock lock{mutex};
+    if (shown) {
+        ++frames;
+        late += late_ms > 33;
+        lag_sum += late_ms;
+        skipped += skipped_now;
+    } else {
+        ++repeats;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - window >= std::chrono::seconds(5)) {
+        if (frames) {
+            std::printf("Movie frames: %u shown, %u polls without a new one, %u late (>33 ms), "
+                        "%u skipped to catch up, behind the clock by %.0f ms on average\n",
+                        frames, repeats, late, skipped, double(lag_sum) / frames);
+        }
+        frames = repeats = late = skipped = 0;
+        lag_sum = 0;
+        window = now;
+    }
 }
 
 bool AvPlayerSource::GetAudioData(AvPlayerFrameInfo& audio_info) {
@@ -406,6 +495,16 @@ bool AvPlayerSource::GetAudioData(AvPlayerFrameInfo& audio_info) {
         m_audio_buffers.Push(std::move(m_current_audio_frame->buffer));
         m_current_audio_frame.reset();
         m_audio_buffers_cv.Notify();
+    }
+
+    // Linux fork: sound is handed out only shortly before it is due on the playback clock, as
+    // the PS4 does. Handing out all that was decoded let MediEvil's audio engine buffer a second
+    // and more ahead: the movies' sound came ~1 s after the picture on the Steam Deck, and the
+    // clock (taken from the sound handed out) ran ahead of the picture. GOW3_MOVIE_AUDIO_LEAD_MS
+    // (default 150); GOW3_MOVIE_AUDIO_LEAD_MS=-1: as before.
+    if (PacedAudio() && m_state.GetSyncMode() == AvPlayerAvSyncMode::Default &&
+        s64(m_audio_frames.Front().info.timestamp) > s64(CurrentTime()) + AudioLeadMs()) {
+        return false;
     }
 
     auto frame = m_audio_frames.Pop();
@@ -462,6 +561,18 @@ u64 AvPlayerSource::DurationMillis() const {
     return duration;
 }
 
+s64 AvPlayerSource::AudioLeadMs() {
+    static const s64 lead = [] {
+        const char* env = std::getenv("GOW3_MOVIE_AUDIO_LEAD_MS");
+        return env ? s64(std::atoi(env)) : s64(150);
+    }();
+    return lead;
+}
+
+bool AvPlayerSource::PacedAudio() {
+    return AudioLeadMs() >= 0;
+}
+
 u64 AvPlayerSource::CurrentTime() {
     if (!m_start_time.has_value()) {
         return 0;
@@ -476,6 +587,15 @@ u64 AvPlayerSource::CurrentTime() {
 
     using namespace std::chrono;
     const auto now = m_is_paused.load() ? m_pause_time : high_resolution_clock::now();
+    if (PacedAudio()) {
+        // Linux fork: the wall clock since Start, without pauses (see GetAudioData).
+        const auto wall =
+            duration_cast<milliseconds>(now - m_start_time.value() - m_wall_pause).count();
+        if (wall <= 0) {
+            return 0;
+        }
+        return m_duration != 0 && u64(wall) > m_duration ? m_duration : u64(wall);
+    }
     if (m_audio_stream_index) {
         const auto last_audio = m_last_data_time.value_or(now);
         const auto elapsed =
@@ -812,7 +932,7 @@ Frame AvPlayerSource::PrepareAudioFrame(GuestBuffer buffer, const AVFrame& frame
                     {
                         .audio =
                             {
-                                .channel_count = u16(frame.ch_layout.nb_channels),
+                                .channel_count = u16(std::max(1, frame.ch_layout.nb_channels)),
                                 .sample_rate = u32(frame.sample_rate),
                                 .size = u32(size),
                             },

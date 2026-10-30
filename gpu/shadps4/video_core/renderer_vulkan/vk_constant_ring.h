@@ -19,7 +19,11 @@ namespace Vulkan {
 
 class ConstantRing {
 public:
-    static constexpr u64 Capacity = 32ull << 20;
+    // Linux fork (from the Uncharted Linux fork): 64 MiB (was 32). With the GPU a frame behind,
+    // a full ring made every draw poll the driver (an ioctl) in Retire() on the Steam Deck.
+    // 256 MiB: MediEvil's Pumpkin Gorge (~6,000 draws a frame) still filled 64 MiB; the GPU
+    // thread then spent ~72% of its time in that ioctl (stack samples on the Deck's APU).
+    static constexpr u64 Capacity = 256ull << 20;
 
     ConstantRing(const Instance& instance, Scheduler& scheduler_)
         : scheduler{scheduler_},
@@ -89,15 +93,27 @@ private:
     }
 
     void Retire() {
+        // Linux fork: the GPU tick other paths already read first; a fresh one (an ioctl) only
+        // when that frees nothing. (Polling less often than that made draws fall back to reading
+        // their constants later, from guest memory already rewritten: Uncharted 3's characters
+        // stretched on the Steam Deck.)
         auto* semaphore = scheduler.GetWorkSemaphore();
-        semaphore->Refresh();
+        if (!RetireKnown(semaphore)) {
+            semaphore->Refresh();
+            RetireKnown(semaphore);
+        }
+    }
+
+    bool RetireKnown(Semaphore* semaphore) {
         u64 at = stamps_tail.load(std::memory_order_relaxed);
+        const u64 first = at;
         const u64 head = stamps_head.load(std::memory_order_acquire);
         while (at < head && semaphore->IsFree(stamps[at % stamps.size()].tick)) {
             retired = stamps[at % stamps.size()].end;
             ++at;
         }
         stamps_tail.store(at, std::memory_order_release);
+        return at != first;
     }
 
     struct StampEntry {

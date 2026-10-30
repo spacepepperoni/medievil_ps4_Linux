@@ -7,6 +7,11 @@
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
+#include <chrono>
+#include <unordered_map>
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -59,9 +64,14 @@ static std::pair<u32, u32> SanitizeCopyLayers(const VideoCore::ImageInfo& src_in
     // If the image type is equal, layer count must match. Take the minimum of both.
     if (vk_src_type == vk_dst_type) {
         if (src_layers != dst_layers) {
+            // Linux fork: which images (a layer left uncopied may hold stale data).
             LOG_WARNING(Render_Vulkan,
-                        "Coercing copy source layers {} and destination layers {} to minimum.",
-                        src_layers, dst_layers);
+                        "Coercing copy source layers {} and destination layers {} to minimum "
+                        "({:#x} {} {}x{} type {} -> {:#x} {}x{} type {}).",
+                        src_layers, dst_layers, src_info.guest_address,
+                        vk::to_string(src_info.pixel_format), src_info.size.width,
+                        src_info.size.height, u32(src_info.type), dst_info.guest_address,
+                        dst_info.size.width, dst_info.size.height, u32(dst_info.type));
             src_layers = dst_layers = std::min(src_layers, dst_layers);
         }
     } else {
@@ -923,19 +933,85 @@ void Runtime::FlushBarriers() {
         return;
     }
 
+    // gow3: the largest batches in the log (AMD's older driver crashed at 3696 image barriers).
+    static size_t largest_batch = 64;
+    if (image_barriers.size() > largest_batch) {
+        largest_batch = image_barriers.size();
+        std::printf("Barriers: %zu image barriers in one batch (largest so far)\n", largest_batch);
+        std::fflush(stdout);
+    }
+    // Linux fork: GOW3_PASS_BREAKS=1 also counts which caller flushes barriers inside an active
+    // render pass, and whether they change image layouts or only order memory.
+    static const bool pass_breaks = [] {
+        const char* env = std::getenv("GOW3_PASS_BREAKS");
+        return env && env[0] == '1';
+    }();
+    if (pass_breaks && scheduler.IsRendering()) {
+        static std::unordered_map<void*, std::pair<u64, u64>> callers; // images, memory-only
+        static auto next = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        auto& entry = callers[__builtin_return_address(0)];
+        (image_barriers.empty() ? entry.second : entry.first) += 1;
+        // Which layout changes (old -> new, aspect, size of the first barrier's image).
+        static std::unordered_map<std::string, u64> kinds;
+        for (const auto& b : image_barriers) {
+            kinds[fmt::format("{}->{} {}", vk::to_string(b.oldLayout), vk::to_string(b.newLayout),
+                              vk::to_string(b.subresourceRange.aspectMask))]++;
+        }
+        static auto next_kinds = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        if (std::chrono::steady_clock::now() >= next_kinds) {
+            std::vector<std::pair<u64, std::string>> top;
+            for (const auto& [k, n] : kinds) top.emplace_back(n, k);
+            std::ranges::sort(top, std::greater{});
+            for (size_t i = 0; i < std::min<size_t>(6, top.size()); ++i) {
+                std::printf("Barrier kind in a pass (5 s): %llu x %s\n",
+                            static_cast<unsigned long long>(top[i].first), top[i].second.c_str());
+            }
+            kinds.clear();
+            next_kinds = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        }
+        if (std::chrono::steady_clock::now() >= next) {
+            std::vector<std::pair<u64, void*>> top;
+            for (const auto& [caller, c] : callers) top.emplace_back(c.first + c.second, caller);
+            std::ranges::sort(top, std::greater{});
+            std::string line;
+            for (size_t i = 0; i < std::min<size_t>(8, top.size()); ++i) {
+                uintptr_t offset = reinterpret_cast<uintptr_t>(top[i].second);
+#ifndef _WIN32
+                Dl_info info{};
+                if (dladdr(top[i].second, &info) && info.dli_fbase) {
+                    offset -= reinterpret_cast<uintptr_t>(info.dli_fbase);
+                }
+#endif
+                const auto& c = callers[top[i].second];
+                line += fmt::format(" +{:#x}={}img/{}mem", offset, c.first, c.second);
+            }
+            std::printf("Barrier flushes in a pass (5 s):%s\n", line.c_str());
+            callers.clear();
+            next = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        }
+    }
     scheduler.EndRendering();
     scheduler.Record([memory = memory_barrier, has_memory = dep_info.memoryBarrierCount != 0,
                       images = scheduler.RecordData(std::span<const vk::ImageMemoryBarrier2>(
                           image_barriers.data(), image_barriers.size()))](vk::CommandBuffer cmdbuf) {
-        const vk::DependencyInfo info = {
-            .memoryBarrierCount = has_memory ? 1U : 0U,
-            .pMemoryBarriers = has_memory ? &memory : nullptr,
-            .imageMemoryBarrierCount = static_cast<u32>(images.size()),
-            .pImageMemoryBarriers = images.data(),
-        };
-        recording_barriers = &info;
-        cmdbuf.pipelineBarrier2(info);
-        recording_barriers = nullptr;
+        // gow3: at most 128 image barriers per call: AMD's older Windows driver (RX 400/500, Vega)
+        // crashed recording thousands in one (issues #18, #34, #41, #43).
+        constexpr size_t MaxImageBarriers = 128;
+        size_t done = 0;
+        do {
+            const size_t count = std::min(images.size() - done, MaxImageBarriers);
+            const bool with_memory = has_memory && done == 0;
+            const vk::DependencyInfo info = {
+                .memoryBarrierCount = with_memory ? 1U : 0U,
+                .pMemoryBarriers = with_memory ? &memory : nullptr,
+                .imageMemoryBarrierCount = static_cast<u32>(count),
+                .pImageMemoryBarriers = images.data() + done,
+            };
+            recording_barriers = &info;
+            cmdbuf.pipelineBarrier2(info);
+            recording_barriers = nullptr;
+            done += count;
+        } while (done < images.size());
     });
 
     memory_barrier.srcStageMask = vk::PipelineStageFlagBits2::eNone;

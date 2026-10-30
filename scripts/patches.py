@@ -72,8 +72,11 @@ PATCHES_DIR=Path(__file__).resolve().parent.parent/'patches'
 # MediEvil, America and Europe: only the analysed eboots (sha256) get these patches.
 GAMES=[({'CUSA11227','CUSA12982'},PATCHES_DIR/'MediEvil.xml','01.00',
         'a7e976d13b9649c5cd1ccb617b02f4a27b95c45b9f5331470b90a1f014c3b828'),
+       # 01.02 exists as at least two eboot builds with the patched code at the same addresses
+       # (e50c9b36: the dump of PR #26; cd273b59: the European CUSA12982 update, 29 Oct 2026).
        ({'CUSA11227','CUSA12982'},PATCHES_DIR/'MediEvil.xml','01.02',
-        'e50c9b36153416949d377ad0ddafac1a888c119987095615dc0f69b5ad15e401')]
+        ('e50c9b36153416949d377ad0ddafac1a888c119987095615dc0f69b5ad15e401',
+         'cd273b59a2220ecec970434edf022ff03aa298851dae28b0460814a996ff5634'))]
 DMEM_RETAIL_MB=5056  # runtime_memory.c POOL_SIZE default
 
 
@@ -86,7 +89,8 @@ def game_title_id(game):
 
 
 def game_profile(title_id,app_version=None):
-    """(title IDs, built-in XML, app version, eboot sha256 or None) for a known game version,
+    """(title IDs, built-in XML, app version, eboot sha256 (one, or a tuple of builds) or None)
+    for a known game version,
     else None; without app_version, the first entry for the game."""
     return next((g for g in GAMES if title_id in g[0] and (app_version is None or g[2]==app_version)),None)
 
@@ -97,7 +101,8 @@ def eboot_matches(game, profile):
         return True
     import hashlib
     try:
-        return hashlib.sha256((Path(game)/'eboot.bin').read_bytes()).hexdigest()==profile[3]
+        known=profile[3] if isinstance(profile[3],tuple) else (profile[3],)
+        return hashlib.sha256((Path(game)/'eboot.bin').read_bytes()).hexdigest() in known
     except OSError:
         return False
 

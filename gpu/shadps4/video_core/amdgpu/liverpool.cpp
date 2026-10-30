@@ -276,10 +276,50 @@ void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
         rasterizer.SignalAfterHostCopies([eop] { SignalEop(eop); });
     } else {
         // Labels are written in order: not before the ones deferred to the recording thread.
+        Gow3Stats::WaitSite site{Gow3Stats::SiteEop};
         rasterizer.WaitHostCopies();
         rasterizer.WaitDeferredSignals();
         SignalEop(eop);
     }
+}
+
+// Linux fork (from the Uncharted Linux fork, 824a5c0): a compute queue's ReleaseMem fence (memory
+// data, no GDS), in order with the draws and dispatches handed to the draw recording thread, like
+// the graphics end-of-pipe fence: written once the guest memory copies queued before it are done,
+// without the GPU command thread draining the pipe and waiting for them. In Uncharted 2 on the
+// Steam Deck: host copy waits 19% -> 1.8% of the GPU thread. GOW3_ASC_FENCE_PIPE=0: inline wait.
+struct ComputeFence {
+    PM4CmdReleaseMem release_mem;
+    u32 pipe_id;
+};
+
+void SignalComputeFence(const ComputeFence& fence) {
+    fence.release_mem.SignalFence(
+        [pipe_id = fence.pipe_id] {
+            Platform::IrqC::Instance()->Signal(static_cast<Platform::InterruptId>(pipe_id));
+        },
+        [](VAddr, u16, u16) { UNREACHABLE_MSG("GDS fence handed to the draw recording thread"); });
+}
+
+void RunComputeReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
+    const auto fence = *reinterpret_cast<const ComputeFence*>(data);
+    rasterizer.ProcessDownloadImages();
+    if (Vulkan::DrawPipe::OnStageB() && !Gow3Toggle::Disabled(Gow3Toggle::RecorderFences)) {
+        rasterizer.SignalAfterHostCopies([fence] { SignalComputeFence(fence); });
+    } else {
+        Gow3Stats::WaitSite site{Gow3Stats::SiteComputeFence};
+        rasterizer.WaitHostCopies();
+        rasterizer.WaitDeferredSignals();
+        SignalComputeFence(fence);
+    }
+}
+
+bool PipelinedComputeFences() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_ASC_FENCE_PIPE");
+        return !(env && env[0] == '0');
+    }();
+    return enabled;
 }
 
 void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
@@ -317,6 +357,7 @@ void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
 }
 
 void SignalFlip(Vulkan::Rasterizer& rasterizer, const u8*) {
+    Gow3Stats::WaitSite site{Gow3Stats::SiteFlip};
     rasterizer.WaitDeferredSignals();
     Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip);
 }
@@ -326,6 +367,7 @@ void RunWriteData(Vulkan::Rasterizer& rasterizer, const u8* data) {
     const auto* write_data = reinterpret_cast<const PM4CmdWriteData*>(data);
     // Copies deferred to the recording thread, and fences deferred to it (RecorderFences),
     // precede writes the guest sees.
+    Gow3Stats::WaitSite site{Gow3Stats::SiteWriteData};
     rasterizer.WaitHostCopies();
     rasterizer.WaitDeferredSignals();
     Gow3WriteLog::Note(write_data->Address<u64>(), write_data->data,
@@ -334,12 +376,7 @@ void RunWriteData(Vulkan::Rasterizer& rasterizer, const u8* data) {
                 (header->type3.count.Value() - 2) * sizeof(u32));
 }
 
-void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
-    const auto& event_eos = *reinterpret_cast<const PM4CmdEventWriteEos*>(data);
-    // Copies deferred to the recording thread precede writes the guest sees.
-    rasterizer.WaitHostCopies();
-    rasterizer.WaitDeferredSignals();
-    rasterizer.ProcessDownloadImages();
+void SignalEos(const PM4CmdEventWriteEos& event_eos) {
     event_eos.SignalFence([](void* address, u64 value, u32 num_bytes) {
         auto* memory = Core::Memory::Instance();
         Gow3WriteLog::Note(reinterpret_cast<u64>(address), &value, num_bytes, Gow3WriteLog::Fence);
@@ -347,6 +384,30 @@ void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
             memcpy(address, &value, num_bytes);
         }
     });
+}
+
+void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
+    const auto& event_eos = *reinterpret_cast<const PM4CmdEventWriteEos*>(data);
+    // Linux fork: a memory fence goes to the Vulkan recording thread like the end-of-pipe one
+    // (RunEventWriteEop), written once the copies queued before it are done, instead of the
+    // draw recording thread waiting for them: ~10 waits and ~2 ms a frame in MediEvil's heavy
+    // scenes on pyro. GOW3_EOS_DEFER=0: the wait as before.
+    static const bool defer = [] {
+        const char* env = std::getenv("GOW3_EOS_DEFER");
+        return !(env && env[0] == '0');
+    }();
+    if (defer && event_eos.command != PM4CmdEventWriteEos::Command::GdsStore &&
+        Vulkan::DrawPipe::OnStageB() && !Gow3Toggle::Disabled(Gow3Toggle::RecorderFences)) {
+        rasterizer.ProcessDownloadImages();
+        rasterizer.SignalAfterHostCopies([event_eos] { SignalEos(event_eos); });
+        return;
+    }
+    // Copies deferred to the recording thread precede writes the guest sees.
+    Gow3Stats::WaitSite site{Gow3Stats::SiteEos};
+    rasterizer.WaitHostCopies();
+    rasterizer.WaitDeferredSignals();
+    rasterizer.ProcessDownloadImages();
+    SignalEos(event_eos);
     if (event_eos.command == PM4CmdEventWriteEos::Command::GdsStore) {
         ASSERT(event_eos.size == 1);
         rasterizer.Finish();
@@ -1232,6 +1293,17 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const u64* wait_addr = wait_reg_mem->Address<u64*>();
                 if (vo_port->IsVoLabel(wait_addr) &&
                     num_submits == mapped_queues[GfxQueueId].submits.size()) {
+                    // Linux fork (from the Uncharted Linux fork): a display buffer the presenter
+                    // has released already needs no drain; the recording thread goes on with the
+                    // previous frame while this one is decoded. An unmet wait drains and sleeps
+                    // as before. GOW3_VO_LABEL_DRAIN=1: always drain.
+                    static const bool always_drain = [] {
+                        const char* env = std::getenv("GOW3_VO_LABEL_DRAIN");
+                        return env && env[0] == '1';
+                    }();
+                    if (!always_drain && wait_reg_mem->Test(regs.reg_array)) {
+                        break;
+                    }
                     if (rasterizer) {
                         rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
                     }
@@ -1353,6 +1425,36 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     FIBER_EXIT;
 }
 
+namespace {
+/// Linux fork (from the Uncharted Linux fork, 3f7be65): compute queue packets that must not run
+/// before the draw pipe ran dry. The others hand their work to the pipe (dispatches), drain it
+/// themselves (DMA) or only write registers. GOW3_ASC_DRAIN=all: drain before every packet.
+bool AscPacketNeedsDrain(PM4ItOpcode opcode) {
+    static const bool all = [] {
+        const char* env = std::getenv("GOW3_ASC_DRAIN");
+        return env && std::string_view{env} == "all";
+    }();
+    if (all) {
+        return true;
+    }
+    switch (opcode) {
+    case PM4ItOpcode::Nop:
+    case PM4ItOpcode::SetShReg:
+    case PM4ItOpcode::SetQueueReg:
+    case PM4ItOpcode::AcquireMem:
+    case PM4ItOpcode::DispatchDirect:
+    case PM4ItOpcode::DispatchIndirect:
+    case PM4ItOpcode::DmaData:
+    case PM4ItOpcode::IndirectBuffer: // its own packets decide
+        return false;
+    case PM4ItOpcode::ReleaseMem: // handed to the pipe, or drains itself (GDS, GOW3_ASC_FENCE_PIPE=0)
+        return !PipelinedComputeFences();
+    default:
+        return true;
+    }
+}
+} // namespace
+
 template <bool is_indirect>
 Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     FIBER_ENTER(acb_task_name[vqid]);
@@ -1368,9 +1470,6 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     size_t acb_size = acb.size_bytes();
     while (!acb.empty()) {
         ProcessCommands();
-        if (rasterizer) {
-            rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCompute); // gow3: compute work uses the caches
-        }
 
         auto* header = reinterpret_cast<const PM4Header*>(acb.data());
         u32 next_dw_off = header->type3.NumWords() + 1;
@@ -1412,6 +1511,11 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
 
         const PM4ItOpcode opcode = header->type3.opcode;
+        // gow3: compute work uses the caches the draw recording thread owns, so the pipe is
+        // drained first. Linux fork: not for packets that are pipelined or drain themselves.
+        if (rasterizer && AscPacketNeedsDrain(opcode)) {
+            rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCompute);
+        }
 
         const auto* it_body = reinterpret_cast<const u32*>(header) + 1;
         switch (opcode) {
@@ -1566,6 +1670,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             // gow3: copies deferred to the recording thread precede writes the guest sees, and
             // so do graphics fences deferred to it (the pipe was drained before this packet).
             if (rasterizer) {
+                Gow3Stats::WaitSite site{Gow3Stats::SiteAscWriteData};
                 rasterizer->WaitHostCopies();
                 rasterizer->WaitDeferredSignals();
             }
@@ -1600,9 +1705,20 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             break;
         }
         case PM4ItOpcode::ReleaseMem: {
+            // Linux fork: memory fences go to the draw recording thread in order (ComputeFence).
+            if (rasterizer && PipelinedComputeFences()) {
+                const auto* fence_packet = reinterpret_cast<const PM4CmdReleaseMem*>(header);
+                if (fence_packet->data_sel.Value() != DataSelect::GdsMemStore) {
+                    const ComputeFence fence{*fence_packet, queue.pipe_id};
+                    rasterizer->RunInOrder(&RunComputeReleaseMem, &fence, sizeof(fence));
+                    break;
+                }
+                rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCompute);
+            }
             // gow3: copies deferred to the recording thread precede writes the guest sees, and
             // so do graphics fences deferred to it (the pipe was drained before this packet).
             if (rasterizer) {
+                Gow3Stats::WaitSite site{Gow3Stats::SiteAscReleaseMem};
                 rasterizer->WaitHostCopies();
                 rasterizer->WaitDeferredSignals();
             }

@@ -472,6 +472,12 @@ public:
                image_2d_view_of_3d_features.sampler2DViewOf3D;
     }
 
+    /// Linux fork: 2D views of 3D images as render targets and storage only (image2DViewOf3D
+    /// without sampler2DViewOf3D, as on the Steam Deck's SteamOS RADV).
+    bool Is2dViewOf3dImageSupported() const {
+        return image_2d_view_of_3d && image_2d_view_of_3d_features.image2DViewOf3D;
+    }
+
     /// Returns whether VK_EXT_image_view_min_lod is supported.
     bool IsImageViewMinLodSupported() const {
         return image_view_min_lod;
@@ -571,6 +577,8 @@ private:
     bool maintenance_8{};
     bool attachment_feedback_loop{};
     bool image_2d_view_of_3d{};
+    bool memory_priority{};        ///< gow3: VK_EXT_memory_priority (for pageable memory)
+    bool pageable_device_memory{}; ///< gow3: VK_EXT_pageable_device_local_memory
     bool image_view_min_lod{};
     bool shader_clock{};
     bool compute_shader_derivatives{};

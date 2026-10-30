@@ -6,6 +6,11 @@
 #include "gow3_copy.h"
 
 #include <deque>
+#include <span>
+#include <unordered_map>
+#include <vector>
+#include <utility>
+#include "gow3_toggles.h"
 #include <boost/container/small_vector.hpp>
 
 #include "common/interval_set.h"
@@ -130,7 +135,7 @@ private:
 
     void EnsureResident(const Buffer* arena, u64 first_block, u64 last_block);
 
-    void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size);
+    void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size, bool for_write = false);
 
     bool SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size, bool is_written,
                            bool is_texel_buffer);
@@ -178,14 +183,46 @@ private:
     struct Backing : public Interval {
         vk::DeviceMemory memory;
         u64 offset;
+        u8* mapped; ///< Linux fork: the CPU mapping of `memory` (host-visible arenas), or null
         constexpr bool CanMergeWith(const Backing& other) const noexcept {
             return memory == other.memory && offset + (end - start) == other.offset;
         }
         constexpr Backing SubRange(u64 a, u64 b) const noexcept {
-            return {{a, b}, memory, offset + (a - start)};
+            return {{a, b}, memory, offset + (a - start), mapped};
         }
     };
     IntervalList<Backing> resident_ranges;
+
+    /// Linux fork: on a GPU sharing memory with the CPU (Steam Deck) the arena memory is mapped
+    /// and GPU-written data the CPU needs is read from it once the submission that wrote it is
+    /// done, instead of a copy behind all submitted work (DownloadMemory). Each written 64 KiB
+    /// granule keeps the tick of its last write (UnknownTick: written where the tick is not
+    /// known, then the copy as before).
+    static constexpr u64 WriteGranuleBits = 16;
+    static constexpr u64 UnknownTick = ~u64{0};
+    bool arena_host_mapped{};
+    std::unordered_map<u64, u64> write_ticks;
+    Gow3Stats::SpinLock write_ticks_lock;
+    void NoteGpuWrite(VAddr device_addr, u64 size);
+    bool DownloadMapped(std::span<const std::pair<VAddr, VAddr>> ranges, bool for_write);
+
+    /// Linux fork: GPU-written ranges whose submission was still running when the CPU wrote
+    /// next to them. The CPU write goes on at once; the GPU bytes are merged into guest memory
+    /// once the submission is done (bytes the CPU changed meanwhile are kept and uploaded), and
+    /// until then uploads from guest memory leave these ranges out (the arena holds the newer
+    /// GPU data). GOW3_DEFER_DOWNLOADS=0: wait for the submission instead.
+    struct PendingMerge {
+        VAddr start, end;
+        u64 tick;
+        std::vector<u8> snapshot; ///< guest bytes when the CPU write started
+    };
+    std::vector<PendingMerge> pending_merges;
+    std::atomic<bool> has_pending_merges{false};
+    Gow3Stats::SpinLock pending_lock;
+    bool PendingOverlaps(VAddr addr, u64 size);
+    void RetirePendingMerges(bool wait);
+    void MergePending(PendingMerge& merge);
+    const u8* MappedArena(VAddr addr, u64 size) const;
 
     u32 arena_memory_type_index{};
     u32 block_size{};

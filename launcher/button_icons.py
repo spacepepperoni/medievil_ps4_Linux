@@ -10,6 +10,8 @@ FACE = {
     'playstation': {'a': ('cross', '#6b9ae8'), 'b': ('circle', '#e5555e'),
                     'x': ('square', '#d683d6'), 'y': ('triangle', '#45c4a2')},
     'xbox': {'a': ('A', '#3fae49'), 'b': ('B', '#d9372f'), 'x': ('X', '#2f6fd9'), 'y': ('Y', '#e5b521')},
+    # Linux fork: the Steam Deck's dark buttons with white letters.
+    'steamdeck': {'a': ('A', '#f2f2f2'), 'b': ('B', '#f2f2f2'), 'x': ('X', '#f2f2f2'), 'y': ('Y', '#f2f2f2')},
 }
 LABELS = {
     'playstation': {'leftshoulder': 'L1', 'rightshoulder': 'R1', 'lefttrigger': 'L2', 'righttrigger': 'R2',
@@ -18,6 +20,9 @@ LABELS = {
     'xbox': {'leftshoulder': 'LB', 'rightshoulder': 'RB', 'lefttrigger': 'LT', 'righttrigger': 'RT',
              'leftstick': 'LS', 'rightstick': 'RS', 'start': 'MENU', 'back': 'VIEW',
              'touchpad': 'TOUCH', 'guide': 'XBOX', 'misc1': 'SHARE'},
+    'steamdeck': {'leftshoulder': 'L1', 'rightshoulder': 'R1', 'lefttrigger': 'L2', 'righttrigger': 'R2',
+                  'leftstick': 'L3', 'rightstick': 'R3', 'start': 'MENU', 'back': 'VIEW',
+                  'touchpad': 'PAD', 'guide': 'STEAM', 'misc1': 'QAM'},
 }
 DPAD = {'dpup': 'up', 'dpdown': 'down', 'dpleft': 'left', 'dpright': 'right'}
 # The game's PS4 buttons (launcher CONTROLS) as SDL buttons, for their PlayStation icon.

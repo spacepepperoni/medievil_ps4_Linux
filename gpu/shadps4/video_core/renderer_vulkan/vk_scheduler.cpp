@@ -138,6 +138,36 @@ void Scheduler::EndRendering() {
     if (!is_rendering) {
         return;
     }
+    // Linux fork: GOW3_PASS_BREAKS=1 prints every 5 s who ends an active render pass (each break
+    // stores and reloads the attachments, costly for D32S8 depth on RADV).
+    static const bool pass_breaks = [] {
+        const char* env = std::getenv("GOW3_PASS_BREAKS");
+        return env && env[0] == '1';
+    }();
+    if (pass_breaks) {
+        static std::unordered_map<void*, u64> callers;
+        static auto next = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        ++callers[__builtin_return_address(0)];
+        if (std::chrono::steady_clock::now() >= next) {
+            std::vector<std::pair<u64, void*>> top;
+            for (const auto& [caller, count] : callers) top.emplace_back(count, caller);
+            std::ranges::sort(top, std::greater{});
+            std::string line;
+            for (size_t i = 0; i < std::min<size_t>(8, top.size()); ++i) {
+                uintptr_t offset = reinterpret_cast<uintptr_t>(top[i].second);
+#ifndef _WIN32
+                Dl_info info{};
+                if (dladdr(top[i].second, &info) && info.dli_fbase) {
+                    offset -= reinterpret_cast<uintptr_t>(info.dli_fbase);
+                }
+#endif
+                line += fmt::format(" {}x+{:#x}", top[i].first, offset);
+            }
+            std::printf("Pass breaks (5 s, caller offsets in libgow3gpu):%s\n", line.c_str());
+            callers.clear();
+            next = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        }
+    }
     is_rendering = false;
     Record([](vk::CommandBuffer cmdbuf) { cmdbuf.endRendering(); });
 }
@@ -279,6 +309,7 @@ std::unique_ptr<RecordChunk> Scheduler::AcquireChunk() {
 
 void Scheduler::SignalAfterHostCopies(std::function<void()> signal) {
     if (!IsRecordingDeferred()) {
+        Gow3Stats::WaitSite site{Gow3Stats::SiteSignalInline};
         WaitHostCopies();
         signal();
         return;
@@ -301,6 +332,8 @@ void Scheduler::WaitDeferredSignals() {
         return;
     }
     Gow3Stats::WaitTimer timer{Gow3Stats::host_copies_wait_ns};
+    Gow3Stats::WaitTimer site_timer{Gow3Stats::site_wait_ns[Gow3Stats::wait_site]};
+    Gow3Stats::site_waits[Gow3Stats::wait_site].fetch_add(1, std::memory_order_relaxed);
     KickRecording(true);
     while (deferred_signals_done->load(std::memory_order_acquire) < issued) {
         // Helps the copy threads the signals wait for.
@@ -313,6 +346,8 @@ void Scheduler::WaitHostCopies() {
     if (host_copies_done.load(std::memory_order_acquire) < host_copies_issued) {
         Gow3Stats::WaitTimer timer{Gow3Stats::host_copies_wait_ns};
         Gow3Stats::host_copy_waits.fetch_add(1, std::memory_order_relaxed);
+        Gow3Stats::WaitTimer site_timer{Gow3Stats::site_wait_ns[Gow3Stats::wait_site]};
+        Gow3Stats::site_waits[Gow3Stats::wait_site].fetch_add(1, std::memory_order_relaxed);
         KickRecording(true);
         while (host_copies_done.load(std::memory_order_acquire) < host_copies_issued) {
             std::this_thread::yield();
@@ -526,6 +561,19 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     if (auto* profiler = GpuProfiler::Get(); profiler && profiler->Records(this)) {
         // Until the next submission's first timestamp: mostly the GPU waiting for it.
         profiler->Mark(0x5B317ull, [] { return std::string{"(between submissions: GPU idle)"}; });
+    }
+    if (Gow3Stats::host_read_barrier.load(std::memory_order_relaxed) &&
+        Gow3Stats::host_read_pending.exchange(false, std::memory_order_relaxed)) {
+        // Linux fork: the CPU reads GPU-written buffers from mapped memory once this
+        // submission is done (BufferCache::DownloadMapped).
+        Record([](vk::CommandBuffer cmdbuf) {
+            const vk::MemoryBarrier barrier{
+                .srcAccessMask = vk::AccessFlagBits::eMemoryWrite,
+                .dstAccessMask = vk::AccessFlagBits::eHostRead,
+            };
+            cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+                                   vk::PipelineStageFlagBits::eHost, {}, barrier, {}, {});
+        });
     }
     SyncRecording();
     // Guest memory copies into staging read by this submission (copy threads).

@@ -238,16 +238,93 @@ def add_to_steam(launcher, launcher_file, config_dir, port_dir, _, app_name):
 # Those settings are locked while it is on; turning it off restores the player's own values.
 # On SteamOS it is on until the player turns it off.
 
-DECK_FPS = [('60', ('60',)), ('30', ('30 (longer battery life)',))]
+# 30 by default: the Deck's CPU translates the PS4's GPU commands and does not hold 60 in the
+# levels (upstream #16, #21); a steady 30 also gives longer battery life. 60 can be chosen.
+DECK_FPS = [('30', ('30 (recommended)',)), ('60', ('60',))]
 # medievil.ini values (the game and the in-game menu read the same file).
 DECK_SETTINGS = {
     'display_mode': 'fullscreen',         # gamescope (Game Mode) scales the window to the screen
-    'render_resolution': '720p_native',   # the game itself runs at 720p, no 1080p pass to shrink
+    'engine_fps': '60',                   # the Deck frame rate (30/60) is the limit below it
+    'ue4_upscale': 'off',                 # the 720p scene is already the Deck's scale
+    'fsr1': '0',
+    # The 3D scene at 720p inside the game's 1080p output (gamescope scales that to the screen).
+    # 720p_native (the whole output at 1280x720) showed the 1080p loading screens and movies
+    # cropped, zoomed in with illegible text; at 30 FPS the Deck holds 720p the same.
+    'render_resolution': '720p',
     'ue4_quality': 'low',                 # upstream's setting for integrated graphics
     'vsync': '1',
 }
 DECK_LOCKED = (*DECK_SETTINGS, 'fps_limit')
-APP_DEFAULTS = {'deck_mode': False, 'deck_fps': '60'}
+APP_DEFAULTS = {'deck_mode': False, 'deck_fps': '30', 'record_inputs': False, 'deck_steady_clock': True,
+                'stereo_surround': 'off'}
+# How the game's surround channels go into stereo (GOW3_AUDIO_SURROUND, runtime_audio.c): MediEvil's
+# side and back channels carry delayed copies of positioned sounds, which doubled them in stereo.
+STEREO_SURROUND = [('off', ('Off (front channels only)',)), ('reduced', ('Reduced (-9 dB)',)),
+                   ('full', ('Full (-3 dB)',))]
+STEREO_SURROUND_LEVELS = {'off': '0', 'reduced': '0.35', 'full': '0.71'}
+
+
+def deck_updates(settings, ini_path):
+    """Steam Deck mode's values changed: settings saved by an older launcher take them once
+    (settings.json and, when the mode is on, medievil.ini), also for a start from Steam that never
+    opens the launcher. 30 FPS became the default (deck_30fps) and the 720p scene scale replaced
+    720p native output (deck_720p). Returns True when the settings changed (to be saved)."""
+    import graphics_options
+    changed = False
+    if not settings.get('deck_30fps'):
+        settings['deck_30fps'] = changed = True
+        if settings.get('deck_fps', '30') != '30':
+            settings['deck_fps'] = '30'
+            if settings.get('deck_mode'):
+                graphics_options.write_keys(ini_path, {'fps_limit': '30'})
+    if not settings.get('deck_prompts'):
+        # Steam Deck button pictures (button_prompts.py) for players in Steam Deck mode who kept
+        # the PlayStation names.
+        settings['deck_prompts'] = changed = True
+        if settings.get('deck_mode') and settings.get('pad_style', 'playstation') == 'playstation':
+            settings['pad_style'] = 'steamdeck'
+    if not settings.get('deck_locks2'):
+        # Engine frame rate, upscaling and FSR 1 joined the locked Steam Deck values.
+        settings['deck_locks2'] = changed = True
+        if settings.get('deck_mode'):
+            graphics_options.write_keys(ini_path, {key: DECK_SETTINGS[key]
+                                                   for key in ('engine_fps', 'ue4_upscale', 'fsr1')})
+    if not settings.get('deck_720p'):
+        settings['deck_720p'] = changed = True
+        if settings.get('deck_mode') and \
+                graphics_options.read_ini(ini_path).get('render_resolution') == '720p_native':
+            graphics_options.write_keys(ini_path, {'render_resolution': '720p'})
+    return changed
+
+
+# ---- Options the launcher no longer shows -------------------------------------------------------
+# Switching these could break the game (wrong colours or lighting, hangs, testing-only clocks), so
+# the launcher leaves them out and puts them back to their defaults before every start: also when
+# an older launcher or the in-game menu changed them. extra-env.txt still overrides them for tests.
+HIDDEN_PAGES = ('patches',)  # its one built-in patch (the 4K framebuffer pool) must stay on
+HIDDEN_APP = {'hdr': False, 'draw_pipe': '', 'readbacks': '', 'pipeline_binary_cache': True, 'perf_diag': False,
+              'frame_capture_key': False, 'frame_stats': False, 'gpu_profile': False, 'vk_validation': False,
+              'record_inputs': False, 'patches_dir': ''}
+HIDDEN_INI = {'stale_readback': '0', 'deferred_readback': '1'}
+
+
+def hidden_defaults(settings, ini_path):
+    """Puts the hidden options back to their defaults (settings.json and medievil.ini).
+    Returns True when settings.json changed (to be saved)."""
+    import graphics_options
+    changed = False
+    for key, value in HIDDEN_APP.items():
+        if key in settings and settings[key] != value:
+            settings[key] = value
+            changed = True
+    if 'game_patches' in settings:  # the game's own patch list (defaults: on)
+        del settings['game_patches']
+        changed = True
+    ini = graphics_options.read_ini(ini_path)
+    stale = {key: value for key, value in HIDDEN_INI.items() if key in ini and ini[key] != value}
+    if stale:
+        graphics_options.write_keys(ini_path, stale)
+    return changed
 
 
 def steam_os():
@@ -272,22 +349,55 @@ def get_var(launcher, key, ini_flags):
     return ('1' if value else '0') if key in ini_flags else str(value)
 
 
+def locked_looks(launcher, theme):
+    """Check box images for a locked setting (dimmed), as ttk image element states."""
+    try:
+        from PIL import Image
+        n = max(14, int(16 * launcher.dpi))
+        dim = []
+        for checked in (True, False):
+            image = theme.check_box(n, checked)
+            image.putalpha(image.getchannel('A').point(lambda a: a * 2 // 5))
+            dim.append(launcher.photo(image))
+        return ('disabled selected', dim[0]), ('disabled', dim[1])
+    except ImportError:
+        return ()
+
+
+def set_enabled(widget, enabled):
+    """A setting's control and the title of its row (the cell to its left), greyed out or not."""
+    try:
+        widget.configure(state=('readonly' if widget.winfo_class() == 'TCombobox' else 'normal') if enabled
+                         else 'disabled')
+        info = widget.grid_info()
+        if not info or int(info['column']) < 1:
+            return
+        for cell in widget.master.grid_slaves(row=int(info['row']), column=int(info['column']) - 1):
+            for label in (cell, *cell.winfo_children()):
+                if label.winfo_class() == 'TLabel':
+                    label.state(['!disabled'] if enabled else ['disabled'])
+    except Exception:
+        pass
+
+
 def deck_lock(launcher, on):
-    for key in (*DECK_LOCKED,):
+    for key in DECK_LOCKED:
         for widget in getattr(launcher, 'deck_widgets', {}).get(key, []):
-            try:
-                widget.configure(state='disabled' if on else ('readonly' if widget.winfo_class() == 'TCombobox'
-                                                              else 'normal'))
-            except Exception:
-                pass
+            set_enabled(widget, not on)
     for widget in getattr(launcher, 'deck_fps_widgets', []):
-        widget.configure(state='readonly' if on else 'disabled')
+        set_enabled(widget, on)
 
 
 def deck_switch(launcher, ini_flags):
     """The checkbox changed: apply the Deck values (keeping the player's), or put those back."""
     on = launcher.var('deck_mode', 'app').get()
     if on:
+        # The Deck's button pictures, unless the player chose Xbox ones.
+        if launcher.app.get('pad_style', 'playstation') == 'playstation':
+            launcher.app['pad_style'] = 'steamdeck'
+            if hasattr(launcher, 'pad_style'):
+                launcher.pad_style.set('steamdeck')
+                launcher.relabel_pad_controls()
         launcher.app['deck_saved'] = {key: get_var(launcher, key, ini_flags) for key in DECK_LOCKED}
         for key, value in deck_values(launcher).items():
             set_var(launcher, key, value, ini_flags)
@@ -306,12 +416,20 @@ def track_widget(launcher, key, widget):
 def build_deck_section(launcher, frame, _, ini_flags):
     """The Steam Deck section at the top of the Display page."""
     launcher.section(frame, _('Steam Deck'), top=4)
-    launcher.check(frame, 'deck_mode', 'app', _('Steam Deck mode'),
-                   _('Fullscreen, 720p native output, Low graphics quality and the frame rate below; those '
-                     'settings are locked while it is on. Turn it off to choose your own again.'))
+    # Fullscreen, 720p render resolution, Low graphics quality and the frame rate below; those
+    # settings are locked while it is on.
+    launcher.check(frame, 'deck_mode', 'app', _('Steam Deck mode'))
     box = launcher.choice(frame, 'deck_fps', 'app', DECK_FPS, width=24)
     launcher.row(frame, _('Steam Deck frame rate'), box)
-    launcher.deck_fps_widgets = [box]
+    # The game moves exactly one frame step per frame at the frame rate above (smooth pans and fades
+    # after a slow frame); Steam Deck mode only.
+    clock = launcher.check(frame, 'deck_steady_clock', 'app', _('Steady game clock'))
+    launcher.section(frame, _('Sound'))
+    # The game also plays delayed copies of its sound effects on the surround channels; in stereo
+    # they sound doubled. Off leaves them out (front channels only).
+    launcher.row(frame, _('Surround sounds in stereo'), launcher.choice(frame, 'stereo_surround', 'app', STEREO_SURROUND,
+                                                                       width=24))
+    launcher.deck_fps_widgets = [box, clock]
     launcher.var('deck_mode', 'app').trace_add('write', lambda *_a: deck_switch(launcher, ini_flags))
     launcher.var('deck_fps', 'app').trace_add('write', lambda *_a: launcher.var('deck_mode', 'app').get() and
                                              set_var(launcher, 'fps_limit', launcher.var('deck_fps', 'app').get(),
@@ -355,3 +473,145 @@ def fork_line(launcher, side, bg, gold, text):
         pass
     tk.Label(row, text='Linux fork by spacepepperoni', bg=bg, fg=text, font=launcher.f('body', 9), bd=0).pack(
         side='left')
+
+
+# ---- Sidebar corner: GitHub, updates, version (as in the Uncharted Linux fork) ------------------
+REPO_URL = f'https://github.com/{REPO}'
+
+
+def download_icon(size, color, background, glow=0.0, glow_color=None):
+    """A download symbol (an arrow into a tray) as a PIL image; `glow` 0..1 adds a soft halo."""
+    from PIL import Image, ImageDraw, ImageFilter
+
+    def rgb(value):
+        return tuple(int(value[i:i + 2], 16) for i in (1, 3, 5))
+    n = size * 4
+    image = Image.new('RGB', (n, n), rgb(background))
+    if glow > 0:
+        halo = Image.new('L', (n, n), 0)
+        ImageDraw.Draw(halo).ellipse((n * 0.22, n * 0.22, n * 0.78, n * 0.78), fill=int(170 * glow))
+        halo = halo.filter(ImageFilter.GaussianBlur(n * 0.09))
+        image.paste(Image.new('RGB', (n, n), rgb(glow_color or color)), (0, 0), halo)
+    draw = ImageDraw.Draw(image)
+    w = max(2, int(n * 0.11))
+    c = rgb(color)
+    draw.line((n * 0.5, n * 0.12, n * 0.5, n * 0.62), fill=c, width=w)            # shaft
+    draw.polygon([(n * 0.27, n * 0.44), (n * 0.73, n * 0.44), (n * 0.5, n * 0.7)], fill=c)  # head
+    draw.line((n * 0.14, n * 0.66, n * 0.14, n * 0.86), fill=c, width=w)          # tray
+    draw.line((n * 0.14, n * 0.86, n * 0.86, n * 0.86), fill=c, width=w)
+    draw.line((n * 0.86, n * 0.86, n * 0.86, n * 0.66), fill=c, width=w)
+    return image.resize((size, size), Image.LANCZOS)
+
+
+class Corner:
+    """Bottom of the sidebar: the GitHub mark, the download button (grey: up to date; glowing and
+    pulsing: a new version, click to install it) and the version."""
+
+    def __init__(self, launcher, side, bg, text, muted, gold, version, _):
+        import webbrowser
+        tk = launcher.tk
+        self.launcher, self.muted, self.gold, self.version, self._ = launcher, muted, gold, version, _
+        self.state, self.new_version, self.url, self.page = 'none', None, None, RELEASES_PAGE
+        self.glowing, self.frame = False, 0
+        size = launcher.px(26)
+        row = tk.Frame(side, bg=bg)
+        row.pack(anchor='w', fill='x', padx=18, pady=(0, 18))
+        photo = launcher.photo
+        github_idle, github_hot = (photo(icon_image('github', size, c, bg)) for c in (muted, text))
+        github = tk.Label(row, bg=bg, bd=0, image=github_idle, cursor='hand2')
+        github.pack(side='left')
+        github.bind('<Button-1>', lambda _e: webbrowser.open(REPO_URL))
+        github.bind('<Enter>', lambda _e: github.configure(image=github_hot))
+        github.bind('<Leave>', lambda _e: github.configure(image=github_idle))
+        self.idle, self.hot = (photo(download_icon(size, c, bg)) for c in (muted, text))
+        self.glow_images = [photo(download_icon(size, '#ffd877', bg, glow=g, glow_color=gold))
+                            for g in (0.2, 0.4, 0.6, 0.8, 1.0, 0.8, 0.6, 0.4)]
+        self.button = tk.Label(row, bg=bg, bd=0, image=self.idle, cursor='hand2')
+        self.button.pack(side='left', padx=(launcher.px(12), 0))
+        self.button.bind('<Button-1>', lambda _e: self.clicked())
+        self.button.bind('<Enter>', lambda _e: self.state == 'none' and self.button.configure(image=self.hot))
+        self.button.bind('<Leave>', lambda _e: self.state == 'none' and self.button.configure(image=self.idle))
+        self.label = tk.Label(row, text=version, bg=bg, fg=muted, font=launcher.f('body', 9), bd=0)
+        self.label.pack(side='left', padx=(launcher.px(8), 0))
+
+    def show(self, text=None, fg=None):
+        self.label.configure(text=text or self.version, fg=fg or self.muted)
+
+    def set_state(self, state):
+        self.state = state
+        if state in ('available', 'downloading'):
+            if not self.glowing:
+                self.glowing = True
+                self.glow()
+        else:
+            self.glowing = False
+            self.button.configure(image=self.idle)
+
+    def glow(self):
+        if not self.glowing:
+            return
+        self.frame = (self.frame + 1) % len(self.glow_images)
+        self.button.configure(image=self.glow_images[self.frame])
+        self.launcher.root.after(110, self.glow)
+
+    def offer(self, version, url, page):
+        """A newer release (at launch or while open): the download button glows."""
+        if self.state == 'downloading':
+            return
+        self.new_version, self.url, self.page = version, url, page or RELEASES_PAGE
+        self.set_state('available')
+        self.show(self._('{} available').format(version), self.gold)
+
+    def clicked(self):
+        launcher = self.launcher
+        if self.state == 'available':
+            self.install()
+        elif self.state == 'none':
+            self.show(self._('Checking…'))
+
+            def check():
+                launcher.check_update(manual=True)
+                launcher.ui_calls.put(lambda: self.state == 'none' and self.show())
+            threading.Thread(target=check, daemon=True).start()
+
+    def install(self):
+        """Downloads the new AppImage, puts it in its place and opens it (other installs: the
+        release page)."""
+        import webbrowser
+        launcher, _ = self.launcher, self._
+        if launcher.process:
+            launcher.messagebox.showinfo(STEAM_NAME, _('Close the game before updating.'))
+            return
+        target = appimage()
+        if not target or not self.url:
+            webbrowser.open(self.page)
+            return
+        version = self.new_version
+        self.set_state('downloading')
+
+        def progress(percent):
+            launcher.ui_calls.put(lambda: self.show(_('Downloading {}%').format(percent), self.gold))
+
+        def restart():
+            subprocess.Popen([str(target)], env=clean_env(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+            launcher.root.destroy()
+
+        def work():
+            try:
+                install_appimage(self.url, target, progress)
+                launcher.ui_calls.put(restart)
+            except (OSError, ValueError) as failure:
+                def failed(error=failure):
+                    self.set_state('available')
+                    self.show(_('{} available').format(version), self.gold)
+                    launcher.messagebox.showerror(STEAM_NAME, _('Update failed: {}').format(error))
+                launcher.ui_calls.put(failed)
+        threading.Thread(target=work, daemon=True).start()
+
+
+def periodic_update_check(launcher):
+    """At launch and every 30 minutes while the launcher is open."""
+    if launcher.app.get('update_check', True) and launcher.corner.state == 'none':
+        threading.Thread(target=launcher.check_update, daemon=True).start()
+    launcher.root.after(30 * 60 * 1000, lambda: periodic_update_check(launcher))

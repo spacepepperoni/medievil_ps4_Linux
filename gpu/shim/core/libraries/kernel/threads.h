@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <stop_token>
 #include <system_error>
 #include <thread>
@@ -30,6 +31,19 @@ public:
     // gow3: these are called from guest code, which a C++ exception cannot unwind: a failed
     // join is logged and the thread detached instead.
     void Join() {
+        // Linux fork: one join at a time. AvPlayer's demuxer joins its decoders when the movie
+        // ends while sceAvPlayerStop joins them from the game's thread: two joins of one thread,
+        // and the second waited on a thread that was gone (the game hung on the world map after
+        // a level until a signal woke it). The second caller now waits for the first join here,
+        // then finds the thread no longer joinable.
+        // A thread stopping its own Thread object never waits for the lock: whoever holds it is
+        // joining this very thread and would wait for it forever.
+        if (thread.joinable() && thread.get_id() == std::this_thread::get_id()) {
+            std::unique_lock self_lock{join_mutex, std::try_to_lock};
+            if (self_lock && thread.joinable()) thread.detach();
+            return;
+        }
+        std::scoped_lock join_lock{join_mutex};
         if (!thread.joinable()) return;
         try {
             if (thread.get_id() == std::this_thread::get_id()) thread.detach();
@@ -47,6 +61,11 @@ public:
         }
     }
     bool Joinable() const { return thread.joinable(); }
+    // Linux fork: ask the thread to stop without waiting, so whatever it sleeps on can be woken
+    // before the join (AvPlayerSource::Stop).
+    void RequestStop() {
+        if (thread.joinable()) thread.request_stop();
+    }
     void Stop() {
         if (thread.joinable()) {
             thread.request_stop();
@@ -57,5 +76,6 @@ public:
 private:
     std::jthread thread;
     std::shared_ptr<std::atomic<bool>> finished;
+    std::mutex join_mutex; ///< Linux fork: Join() from several threads at once
 };
 } // namespace Libraries::Kernel

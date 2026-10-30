@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <bit>
 #include <cstdlib>
+#include <cstring>
 #include <magic_enum/magic_enum.hpp>
 #include "gow3_copy.h"
 #include "gow3_toggles.h"
@@ -29,7 +30,9 @@
 namespace VideoCore {
 
 static constexpr size_t GDS_BUFFER_SIZE = 64_KB;
-static constexpr size_t STREAM_BUFFER_SIZE = 128_MB;
+// Linux fork: 384 MiB (was 128). MediEvil's Pumpkin Gorge (~6,000 draws a frame) filled it and
+// the draw recording thread waited for the GPU in Reserve ~36% of its time on the Deck's APU.
+static constexpr size_t STREAM_BUFFER_SIZE = 384_MB;
 
 static constexpr auto ARENA_USAGE =
     vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst |
@@ -93,6 +96,37 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
         FindMemoryType(instance.GetMemoryProperties(), vk::MemoryPropertyFlagBits::eDeviceLocal,
                        reqs.memoryTypeBits)
             .value();
+    // Linux fork: device-local memory the CPU can map (APUs such as the Steam Deck's offer it
+    // in the same heap): GPU-written data is then read by the CPU directly (DownloadMapped).
+    // GOW3_ARENA_MAPPED=0: plain device-local memory and GPU copies as before. (On: with the
+    // deferred merges below, the only build with MediEvil's Hilltop Mausoleum lit correctly on
+    // the Steam Deck; every build with the old copy-back showed wrong light colours there.)
+    {
+        const char* env = std::getenv("GOW3_ARENA_MAPPED");
+        if (!(env && env[0] == '0')) {
+            constexpr auto wanted = vk::MemoryPropertyFlagBits::eDeviceLocal |
+                                    vk::MemoryPropertyFlagBits::eHostVisible |
+                                    vk::MemoryPropertyFlagBits::eHostCoherent;
+            const auto& props = instance.GetMemoryProperties();
+            const u32 local_heap = props.memoryTypes[arena_memory_type_index].heapIndex;
+            for (u32 i = 0; i < props.memoryTypeCount; ++i) {
+                const auto flags = props.memoryTypes[i].propertyFlags;
+                // Same heap as the plain device-local type: on a discrete GPU the mappable
+                // window (BAR) is small, and there it is not used.
+                if ((reqs.memoryTypeBits & (1u << i)) && (flags & wanted) == wanted &&
+                    !(flags & vk::MemoryPropertyFlagBits::eDeviceUncachedAMD) &&
+                    props.memoryTypes[i].heapIndex == local_heap &&
+                    props.memoryHeaps[local_heap].size >= (u64{1} << 30)) {
+                    arena_memory_type_index = i;
+                    arena_host_mapped = true;
+                    Gow3Stats::host_read_barrier.store(true, std::memory_order_relaxed);
+                    break;
+                }
+            }
+        }
+        std::printf("GPU: buffer arenas in %s memory (type %u)\n",
+                    arena_host_mapped ? "CPU-mapped device" : "device", arena_memory_type_index);
+    }
 
     const u64 bda_pagetable_size =
         (blocks_per_arena_page * num_arena_pages) * sizeof(vk::DeviceAddress);
@@ -169,7 +203,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
             std::max<VAddr>(Common::AlignDown(device_addr, WindowSize), arena->cpu_addr);
         const VAddr window_end = std::min<VAddr>(
             std::max<VAddr>(window_start + WindowSize, device_addr + size), arena_end);
-        DownloadMemory(arena, window_start, window_end - window_start);
+        DownloadMemory(arena, window_start, window_end - window_start, is_write);
         if (is_write) {
             memory_tracker->MarkRegionAsCpuModified(device_addr, size);
         }
@@ -181,36 +215,51 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
     }
 }
 
-void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size) {
+void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size, bool for_write) {
+    if (has_pending_merges.load(std::memory_order_acquire)) {
+        RetirePendingMerges(false);
+    }
+    boost::container::small_vector<std::pair<VAddr, VAddr>, 4> ranges;
+    memory_tracker->ForEachDownloadRange<false>(device_addr, size, [&](u64 address, u64 size) {
+        gpu_modified_ranges.ForEachInRange(address, size, [&](VAddr start, VAddr end) {
+            ranges.emplace_back(start, end);
+        });
+        gpu_modified_ranges.Subtract(address, size);
+    });
+    if (ranges.empty()) {
+        return;
+    }
+    Gow3Stats::buffer_downloads.fetch_add(1, std::memory_order_relaxed);
+    Gow3Stats::NoteDownloadBlock(device_addr);
+    if (DownloadMapped(ranges, for_write)) {
+        memory_tracker->UnmarkRegionAsGpuModified(device_addr, size);
+        return;
+    }
     boost::container::small_vector<vk::BufferCopy, 1> copies;
     u64 total_size_bytes = 0;
     const VAddr arena_base = arena->cpu_addr;
-    memory_tracker->ForEachDownloadRange<false>(device_addr, size, [&](u64 address, u64 size) {
-        const auto add_download = [&](VAddr start, VAddr end) {
-            const u64 new_offset = start - arena_base;
-            const u64 new_size = end - start;
-            copies.push_back(vk::BufferCopy{
-                .srcOffset = new_offset,
-                .dstOffset = total_size_bytes,
-                .size = new_size,
-            });
-            // Align up to avoid cache conflicts
-            constexpr u64 align = 64ULL;
-            constexpr u64 mask = ~(align - 1ULL);
-            total_size_bytes += (new_size + align - 1) & mask;
-        };
-        gpu_modified_ranges.ForEachInRange(address, size, add_download);
-        gpu_modified_ranges.Subtract(address, size);
-    });
-    if (total_size_bytes == 0) {
-        return;
+    for (const auto& [start, end] : ranges) {
+        const u64 new_size = end - start;
+        copies.push_back(vk::BufferCopy{
+            .srcOffset = start - arena_base,
+            .dstOffset = total_size_bytes,
+            .size = new_size,
+        });
+        // Align up to avoid cache conflicts
+        constexpr u64 align = 64ULL;
+        constexpr u64 mask = ~(align - 1ULL);
+        total_size_bytes += (new_size + align - 1) & mask;
     }
     const auto download = staging_pool.Request(total_size_bytes, VideoCore::MemoryType::HostCached);
     for (auto& copy : copies) {
         copy.dstOffset += download.offset;
     }
     runtime.CopyBuffer(arena, download.buffer, copies);
-    scheduler.Finish();
+    Gow3Stats::buffer_download_bytes.fetch_add(total_size_bytes, std::memory_order_relaxed);
+    {
+        Gow3Stats::WaitTimer timer{Gow3Stats::buffer_download_wait_ns};
+        scheduler.Finish();
+    }
 
     download.buffer->Invalidate(download.offset, download.size);
     for (const auto& copy : copies) {
@@ -219,6 +268,204 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
                                 copy.size);
     }
     memory_tracker->UnmarkRegionAsGpuModified(device_addr, size);
+}
+
+// Linux fork: the tick of a GPU write. ObtainBuffer runs where commands are recorded in order
+// with the submissions (the draw recording thread, or the GPU thread with the pipe drained),
+// so the current tick is the submission that writes. Elsewhere (a draw preparation worker)
+// the tick is unknown.
+void BufferCache::NoteGpuWrite(VAddr device_addr, u64 size) {
+    if (!arena_host_mapped || !size) {
+        return;
+    }
+    const u64 tick = scheduler.OwnsRecording() ? scheduler.CurrentTick() : UnknownTick;
+    Gow3Stats::host_read_pending.store(true, std::memory_order_relaxed);
+    const u64 first = device_addr >> WriteGranuleBits;
+    const u64 last = (device_addr + size - 1) >> WriteGranuleBits;
+    std::lock_guard lock{write_ticks_lock};
+    for (u64 granule = first; granule <= last; ++granule) {
+        write_ticks[granule] = tick;
+    }
+}
+
+// Linux fork: GPU-written ranges read straight from the mapped arena memory, waiting only for
+// the submission that last wrote them (usually done already) instead of copying them behind all
+// submitted work. In MediEvil's heavy scenes on the Steam Deck one small block written by the
+// CPU about every third frame cost a whole GPU frame (~35 ms) each time: 18-19 FPS.
+bool BufferCache::DownloadMapped(std::span<const std::pair<VAddr, VAddr>> ranges, bool for_write) {
+    if (!arena_host_mapped) {
+        return false;
+    }
+    u64 tick = 0;
+    {
+        std::lock_guard lock{write_ticks_lock};
+        for (const auto& [start, end] : ranges) {
+            for (u64 granule = start >> WriteGranuleBits; granule <= (end - 1) >> WriteGranuleBits;
+                 ++granule) {
+                const auto it = write_ticks.find(granule);
+                if (it == write_ticks.end() || it->second == UnknownTick) {
+                    return false;
+                }
+                tick = std::max(tick, it->second);
+            }
+        }
+    }
+    // Written in the submission still being recorded: it has to go first (the copy as before).
+    if (tick >= scheduler.CurrentTick()) {
+        return false;
+    }
+    // Every range must be resident and mapped.
+    for (const auto& [start, end] : ranges) {
+        const u64 first_block = start >> block_shift;
+        const u64 end_block = ((end - 1) >> block_shift) + 1;
+        u64 covered = 0;
+        bool mapped = true;
+        resident_ranges.ForEachInRange(first_block, end_block, [&](const Backing& backing) {
+            mapped &= backing.mapped != nullptr;
+            covered += std::min(end_block, backing.end) - std::max(first_block, backing.start);
+        });
+        if (!mapped || covered != end_block - first_block) {
+            return false;
+        }
+    }
+    if (!scheduler.IsFree(tick)) {
+        // Guest memory is read through the backing view: a plain read of a protected page
+        // here, inside the fault handler, faulted again and spun on pending_lock (b22 hung
+        // after MediEvil's opening cinematic). Only for a CPU write: a read needs the data now.
+        // On by default, as in the build that lit MediEvil correctly on the Steam Deck (b28):
+        // the merge keeps bytes the CPU wrote meanwhile, where the old copy-back overwrote them
+        // with older GPU data. Not for the submission still being recorded (b29-b30 did that,
+        // and b30 hit an illegal shader instruction on a level load). GOW3_DEFER_DOWNLOADS=0: off.
+        static const bool defer = [] {
+            const char* env = std::getenv("GOW3_DEFER_DOWNLOADS");
+            return !(env && env[0] == '0');
+        }();
+        if (defer && for_write) {
+            std::vector<PendingMerge> merges;
+            bool readable = true;
+            for (const auto& [start, end] : ranges) {
+                PendingMerge merge{start, end, tick, std::vector<u8>(end - start)};
+                readable &= memory->TryReadBacking(std::bit_cast<const void*>(start),
+                                                   merge.snapshot.data(), end - start);
+                merges.push_back(std::move(merge));
+            }
+            if (readable) {
+                std::lock_guard lock{pending_lock};
+                for (auto& merge : merges) {
+                    pending_merges.push_back(std::move(merge));
+                }
+                has_pending_merges.store(true, std::memory_order_release);
+                Gow3Stats::buffer_downloads_deferred.fetch_add(1, std::memory_order_relaxed);
+                return true;
+            }
+        }
+        Gow3Stats::WaitTimer timer{Gow3Stats::buffer_download_wait_ns};
+        scheduler.Wait(tick);
+    }
+    Gow3Stats::buffer_downloads_mapped.fetch_add(1, std::memory_order_relaxed);
+    for (const auto& [start, end] : ranges) {
+        resident_ranges.ForEachInRange(start >> block_shift, ((end - 1) >> block_shift) + 1,
+                                       [&](const Backing& backing) {
+            const VAddr begin = std::max<VAddr>(start, backing.start << block_shift);
+            const VAddr finish = std::min<VAddr>(end, backing.end << block_shift);
+            if (begin >= finish) {
+                return;
+            }
+            const u8* source =
+                backing.mapped + backing.offset + (begin - (backing.start << block_shift));
+            memory->TryWriteBacking(std::bit_cast<u8*>(begin), source, finish - begin);
+            Gow3Stats::buffer_download_bytes.fetch_add(finish - begin, std::memory_order_relaxed);
+        });
+    }
+    return true;
+}
+
+const u8* BufferCache::MappedArena(VAddr addr, u64 size) const {
+    const u8* found = nullptr;
+    resident_ranges.ForEachInRange(addr >> block_shift, ((addr + size - 1) >> block_shift) + 1,
+                                   [&](const Backing& backing) {
+        if (backing.mapped && (backing.start << block_shift) <= addr &&
+            addr + size <= (backing.end << block_shift)) {
+            found = backing.mapped + backing.offset + (addr - (backing.start << block_shift));
+        }
+    });
+    return found;
+}
+
+bool BufferCache::PendingOverlaps(VAddr addr, u64 size) {
+    if (!has_pending_merges.load(std::memory_order_acquire)) {
+        return false;
+    }
+    std::lock_guard lock{pending_lock};
+    for (const auto& merge : pending_merges) {
+        if (merge.start < addr + size && addr < merge.end) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The GPU bytes of a range whose submission is done go into guest memory, except where the
+// CPU wrote since (those bytes are uploaded to the arena instead).
+void BufferCache::MergePending(PendingMerge& merge) {
+    const u64 size = merge.end - merge.start;
+    const u8* gpu = MappedArena(merge.start, size);
+    if (!gpu) {
+        return; // cannot happen: DownloadMapped checked the mapping
+    }
+    // The guest bytes now, read through the backing view (pages may be protected).
+    std::vector<u8> current(size);
+    if (!memory->TryReadBacking(std::bit_cast<const void*>(merge.start), current.data(), size)) {
+        current = merge.snapshot;
+    }
+    const u8* guest = current.data();
+    u64 i = 0;
+    while (i < size) {
+        const bool cpu_changed = guest[i] != merge.snapshot[i];
+        u64 j = i + 1;
+        while (j < size && (guest[j] != merge.snapshot[j]) == cpu_changed) {
+            ++j;
+        }
+        if (cpu_changed) {
+            memory_tracker->MarkRegionAsCpuModified(merge.start + i, j - i);
+        } else {
+            memory->TryWriteBacking(std::bit_cast<u8*>(merge.start + i), gpu + i, j - i);
+        }
+        i = j;
+    }
+    Gow3Stats::buffer_download_bytes.fetch_add(size, std::memory_order_relaxed);
+}
+
+void BufferCache::RetirePendingMerges(bool wait) {
+    // Each check of a running submission asks the driver (an ioctl). This runs at every buffer
+    // binding while merges are pending: the draw recording thread spent ~13% of its time in
+    // those ioctls in MediEvil's heavy scenes. At most one look every 250 us.
+    if (!wait) {
+        static thread_local std::chrono::steady_clock::time_point next_poll{};
+        const auto now = std::chrono::steady_clock::now();
+        if (now < next_poll) {
+            return;
+        }
+        next_poll = now + std::chrono::microseconds(250);
+    }
+    std::vector<PendingMerge> ready;
+    {
+        std::lock_guard lock{pending_lock};
+        std::erase_if(pending_merges, [&](PendingMerge& merge) {
+            if (!wait && !scheduler.IsFree(merge.tick)) {
+                return false;
+            }
+            ready.push_back(std::move(merge));
+            return true;
+        });
+        has_pending_merges.store(!pending_merges.empty(), std::memory_order_release);
+    }
+    for (auto& merge : ready) {
+        if (wait && !scheduler.IsFree(merge.tick)) {
+            scheduler.Wait(merge.tick);
+        }
+        MergePending(merge);
+    }
 }
 
 namespace {
@@ -306,6 +553,9 @@ void PrintBufferStats() {
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
                                                         bool is_written, bool is_texel_buffer) {
     texture_cache.ResolveReadbacks(device_addr, size, true, ReadbackSource::BufferObtain);
+    if (has_pending_merges.load(std::memory_order_acquire)) {
+        RetirePendingMerges(false);
+    }
     const bool stats = BufferStatsEnabled();
     if (stats) {
         PrintBufferStats();
@@ -354,6 +604,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     }
     if (is_written) {
         gpu_modified_ranges.Add(device_addr, size);
+        NoteGpuWrite(device_addr, size);
     }
     return {arena, arena->Offset(device_addr)};
 }
@@ -396,7 +647,7 @@ bool BufferCache::IsRegionCpuModified(VAddr addr, size_t size) {
 }
 
 bool BufferCache::IsRegionGpuModified(VAddr addr, size_t size) {
-    return memory_tracker->IsRegionGpuModified(addr, size);
+    return memory_tracker->IsRegionGpuModified(addr, size) || PendingOverlaps(addr, size);
 }
 
 void BufferCache::ProcessFaultBuffer() {
@@ -484,6 +735,11 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         .memoryTypeIndex = arena_memory_type_index,
     };
     const auto device_memory = Vulkan::Check(instance.GetDevice().allocateMemory(alloc_info));
+    u8* mapped = nullptr;
+    if (arena_host_mapped) {
+        mapped = static_cast<u8*>(Vulkan::Check(
+            instance.GetDevice().mapMemory(device_memory, 0, VK_WHOLE_SIZE)));
+    }
 
     boost::container::small_vector<vk::BufferCopy, 8> copies;
     const auto staging =
@@ -499,6 +755,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         backing.end = range.end;
         backing.memory = device_memory;
         backing.offset = memory_offset;
+        backing.mapped = mapped;
         resident_ranges.Add(backing);
 
         LOG_INFO(Render, "Making range start={}, end={} resident", backing.start, backing.end);
@@ -531,6 +788,35 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
     memory_tracker->ForEachUploadRange(
         device_addr, size, is_written,
         [&](u64 addr, u64 size) {
+            // Linux fork: ranges with GPU data still to merge stay out (PendingMerge).
+            if (has_pending_merges.load(std::memory_order_acquire)) {
+                boost::container::small_vector<std::pair<VAddr, VAddr>, 4> excluded;
+                {
+                    std::lock_guard lock{pending_lock};
+                    for (const auto& merge : pending_merges) {
+                        if (merge.start < addr + size && addr < merge.end) {
+                            excluded.emplace_back(std::max<VAddr>(merge.start, addr),
+                                                  std::min<VAddr>(merge.end, addr + size));
+                        }
+                    }
+                }
+                if (!excluded.empty()) {
+                    std::ranges::sort(excluded);
+                    VAddr cursor = addr;
+                    const auto emit = [&](VAddr from, VAddr to) {
+                        if (from < to) {
+                            copies.emplace_back(total_size_bytes, from, to - from);
+                            total_size_bytes += to - from;
+                        }
+                    };
+                    for (const auto& [from, to] : excluded) {
+                        emit(cursor, from);
+                        cursor = std::max(cursor, to);
+                    }
+                    emit(cursor, addr + size);
+                    return;
+                }
+            }
             copies.emplace_back(total_size_bytes, addr, size);
             total_size_bytes += size;
         },

@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cmath>
 #include <vector>
+#include <atomic>
+#include <thread>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -25,6 +27,7 @@
 #include "core/emulator_settings.h"
 #include "core/libraries/kernel/time.h"
 #include "core/libraries/videoout/driver.h"
+bool Gow3MoviePlaying(); // Linux fork: gow3gpu.cpp
 #include "core/libraries/videoout/videoout_error.h"
 #include "imgui/renderer/imgui_core.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -45,6 +48,41 @@ extern std::atomic<u32> g_gow3_pending_draws;
 } // namespace Vulkan
 
 namespace Libraries::VideoOut {
+
+// Linux fork: the frame limit in force (0: none), for the game-side pacing (PaceGameFrame).
+static std::atomic<u32> active_frame_limit{0};
+
+// Linux fork: the game's own loop at even intervals. The presents were even (33.33 ms +-0.02)
+// while on the Steam Deck the game itself handed in frames 22 to 47 ms apart in the title
+// cinematic: it moves its camera by the time it measured, so pans looked choppy. The game's
+// submit-and-flip call waits for its slot of the frame limit, so each frame starts one period
+// after the last. Off by default (GOW3_GAME_PACING=1: on): with the present thread's own limit
+// as a second clock, pyro measured 15 to 57 ms frames instead of +-0.02 ms. To be reworked so
+// that only one of the two paces the frames.
+void PaceGameFrame() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_GAME_PACING");
+        return env && env[0] == '1';
+    }();
+    const u32 limit = active_frame_limit.load(std::memory_order_relaxed);
+    if (!enabled || !limit) {
+        return;
+    }
+    using Clock = std::chrono::steady_clock;
+    static Clock::time_point next;
+    const auto period = std::chrono::nanoseconds(1000000000 / limit);
+    const auto now = Clock::now();
+    if (next.time_since_epoch().count() == 0 || now > next + period) {
+        next = now; // first frame, or more than a frame late: start again from now
+    } else if (now < next) {
+        std::this_thread::sleep_until(next);
+    }
+    next += period;
+}
+
+// Linux fork: the game's own flip calls (NoteGuestFlip), for "Game pacing" in the frame stats.
+static std::mutex guest_flip_mutex;
+static std::vector<double> guest_flip_intervals;
 
 constexpr static bool Is32BppPixelFormat(PixelFormat format) {
     switch (format) {
@@ -519,6 +557,47 @@ void VideoOutDriver::Flip(const Request& req) {
                         Gow3Stats::tick_wait_ns.exchange(0) / (window * 1e7),
                         frames ? double(Gow3Stats::reduced_draws.exchange(0)) / frames : 0.0,
                         frames ? double(Gow3Stats::scene_draws.exchange(0)) / frames : 0.0);
+            {
+                // Linux fork: the host copy waits by caller (Gow3Stats::WaitSite).
+                std::string sites;
+                for (int i = 0; i < Gow3Stats::SiteCount; ++i) {
+                    const u64 n = Gow3Stats::site_waits[i].exchange(0);
+                    const u64 ns = Gow3Stats::site_wait_ns[i].exchange(0);
+                    if (n) {
+                        sites += fmt::format("{}{} {:.1f}/frame {:.2f} ms/frame", sites.empty() ? "" : ", ",
+                                             Gow3Stats::wait_site_names[i], frames ? double(n) / frames : 0.0,
+                                             frames ? ns / 1e6 / frames : 0.0);
+                    }
+                }
+                if (!sites.empty()) {
+                    std::printf("Host copy waits: %s\n", sites.c_str());
+                }
+                const u64 downloads = Gow3Stats::buffer_downloads.exchange(0);
+                const u64 downloads_mapped = Gow3Stats::buffer_downloads_mapped.exchange(0);
+                const u64 downloads_deferred = Gow3Stats::buffer_downloads_deferred.exchange(0);
+                const u64 download_bytes = Gow3Stats::buffer_download_bytes.exchange(0);
+                const u64 download_ns = Gow3Stats::buffer_download_wait_ns.exchange(0);
+                if (downloads && frames) {
+                    std::string blocks;
+                    {
+                        std::lock_guard lock{Gow3Stats::download_blocks_mutex};
+                        std::sort(std::begin(Gow3Stats::download_blocks), std::end(Gow3Stats::download_blocks),
+                                  [](const auto& a, const auto& b) { return a.count > b.count; });
+                        for (auto& b : Gow3Stats::download_blocks) {
+                            if (b.count) {
+                                blocks += fmt::format(" {:#x}:{}", b.block << 16, b.count);
+                            }
+                            b = {};
+                        }
+                    }
+                    std::printf("Buffer downloads: %.1f/frame (%.1f read directly, %.1f merged later), %.0f KiB/frame, %.2f ms/frame waiting for the GPU; "
+                                "busiest 64 KiB blocks:%s\n",
+                                double(downloads) / frames, double(downloads_mapped) / frames,
+                                double(downloads_deferred) / frames,
+                                download_bytes / 1024.0 / frames,
+                                download_ns / 1e6 / frames, blocks.c_str());
+                }
+            }
             presenter->GetRasterizer().GetPipelineCache().ReportCompilerStats();
             Vulkan::WaitDiagnostics::Report();
             // Frame pacing: spread of the guest flip intervals (judder that the mean hides).
@@ -540,6 +619,26 @@ void VideoOutDriver::Flip(const Request& req) {
                             sorted[std::min(sorted.size() - 1, sorted.size() * 99 / 100)], spikes);
             }
             intervals.clear();
+            {
+                std::scoped_lock lock{guest_flip_mutex};
+                auto& game = guest_flip_intervals;
+                if (game.size() > 2) {
+                    std::vector<double> sorted = game;
+                    std::sort(sorted.begin(), sorted.end());
+                    double sum = 0, sq = 0;
+                    for (const double ms : game) {
+                        sum += ms;
+                        sq += ms * ms;
+                    }
+                    const double mean = sum / game.size();
+                    std::printf("Game pacing: median %.2f ms, stddev %.2f ms, min %.2f ms, p99 %.2f ms "
+                                "(the game's own flip calls)\n",
+                                sorted[sorted.size() / 2],
+                                std::sqrt(std::max(0.0, sq / game.size() - mean * mean)), sorted.front(),
+                                sorted[std::min(sorted.size() - 1, sorted.size() * 99 / 100)]);
+                }
+                game.clear();
+            }
             window_start = now;
             frames = 0;
             worst_ms = 0;
@@ -601,8 +700,42 @@ void VideoOutDriver::DrawLastFrame() {
     }, true);
 }
 
+// Linux fork: when the game itself submits its flips (sceVideoOutSubmitFlip), for "Game pacing"
+// beside "Frame pacing" (the presents): a camera pan judders when the game takes its frames at
+// uneven moments even though they are shown evenly.
+// Linux fork: the game's frames counted, for frame-stamped input recording and replay
+// (runtime_pad.c). A frame over 700 ms (a level or map loading) starts a new segment, so a replay
+// re-synchronises after every load however long the load took on that machine.
+static std::atomic<u32> guest_segment{0};
+static std::atomic<u64> guest_frames{0}, segment_first_frame{0};
+void FramePosition(u32* segment, u32* frame) {
+    *segment = guest_segment.load(std::memory_order_acquire);
+    *frame = u32(guest_frames.load(std::memory_order_acquire) - segment_first_frame.load(std::memory_order_acquire));
+}
+
+void NoteGuestFlip() {
+    using Clock = std::chrono::steady_clock;
+    static Clock::time_point last;
+    const auto now = Clock::now();
+    if (last.time_since_epoch().count() && now - last > std::chrono::milliseconds(700)) {
+        segment_first_frame.store(guest_frames.load(std::memory_order_relaxed), std::memory_order_release);
+        guest_segment.fetch_add(1, std::memory_order_acq_rel);
+    }
+    guest_frames.fetch_add(1, std::memory_order_acq_rel);
+    std::scoped_lock lock{guest_flip_mutex};
+    if (last.time_since_epoch().count() && guest_flip_intervals.size() < 4096) {
+        guest_flip_intervals.push_back(std::chrono::duration<double, std::milli>(now - last).count());
+    }
+    last = now;
+}
+
 bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
                                 bool is_eop /*= false*/) {
+    // Linux fork: every flip the game submits (its own calls and end-of-pipe flips from its
+    // command buffers), for Game pacing.
+    if (index != -1) {
+        NoteGuestFlip();
+    }
     {
         std::unique_lock lock{port->port_mutex};
         if (index != -1 && port->flip_status.flip_pending_num > 16) {
@@ -675,7 +808,37 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     const auto current_limit = [&] {
         // -1: half the display refresh, so each frame shows for exactly two refreshes.
         const int raw = Gow3Settings::Get().fps_limit.load();
-        const u32 user = raw < 0 ? Gow3DisplayRefreshHz() / 2 : u32(raw);
+        u32 user = raw < 0 ? Gow3DisplayRefreshHz() / 2 : u32(raw);
+        // Linux fork: the game's 30 FPS movies against a 30 FPS limit showed a frame twice or
+        // skipped one whenever the game sampled its clock a little early or late (jittery
+        // cutscenes on the Steam Deck). While a movie plays a limit below 60 steps aside, so
+        // each movie frame shows for two 60 Hz refreshes, but only while the frames are little
+        // more than the movie (a handful of draws): MediEvil also keeps a video running behind
+        // its in-engine title cinematic and menu, hundreds of draws a frame, which the Deck
+        // does not hold at 60 (it judders between 16.7 and 50 ms frames). GOW3_MOVIE_LIMIT=1
+        // keeps the limit.
+        static const bool keep_for_movies = [] {
+            const char* env = std::getenv("GOW3_MOVIE_LIMIT");
+            return env && env[0] == '1';
+        }();
+        // Measured over windows of 4 flips: 60 FPS only after 8 quiet windows in a row (about
+        // a second; loading screens and the first frames of a cinematic flipped it back and
+        // forth), back to the limit after one busy window.
+        static u64 last_draws, last_flips;
+        static u32 quiet_windows;
+        static bool movie_only;
+        const u64 all_draws = Gow3Stats::draws.load(std::memory_order_relaxed);
+        const u64 flips = u64(main_port.flip_status.count);
+        if (flips - last_flips >= 4) {
+            const double draws_per_frame = double(all_draws - last_draws) / double(flips - last_flips);
+            last_draws = all_draws;
+            last_flips = flips;
+            quiet_windows = draws_per_frame < 60 ? quiet_windows + 1 : 0;
+            movie_only = movie_only ? draws_per_frame < 120 : quiet_windows >= 8;
+        }
+        if (user && user < 60 && !keep_for_movies && movie_only && Gow3MoviePlaying()) {
+            user = 60;
+        }
         u32 limit = user;
         if (fixed_limit) {
             const u32 base = EmulatorSettings.GetFrameLimit();
@@ -697,6 +860,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     auto next_flip = std::chrono::steady_clock::now();
     std::printf("VideoOut: vblank %u Hz, frame limit %u FPS\n",
                 EmulatorSettings.GetVblankFrequency(), frame_limit);
+    active_frame_limit.store(frame_limit, std::memory_order_relaxed);
 
     const auto receive_request = [this] -> Request {
         std::scoped_lock lk{mutex};
@@ -719,6 +883,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             immediate_flips = limit != 0;
             next_flip = std::chrono::steady_clock::now();
             std::printf("VideoOut: frame limit %u FPS\n", limit);
+            active_frame_limit.store(limit, std::memory_order_relaxed);
         }
         timer.Start();
         const auto tick_deadline = std::chrono::steady_clock::now() + vblank_period;

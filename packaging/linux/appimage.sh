@@ -157,7 +157,11 @@ host_lib() {
         libX11.so*|libX11-xcb.so*|libxcb*.so*|libXau.so*|libXdmcp.so*|libXext.so*|libz.so*) return 0 ;;
         libbsd.so*|libmd.so*) return 0 ;;   # X11's own dependencies
         libgow3gpu.so) return 0 ;;          # installed beside the runtime (bin/gpu)
-        libGL*|libEGL*|libdrm*|libnvidia*|libvulkan*) return 0 ;;  # GPU stack: the host's (one Vulkan loader)
+        libGL*|libEGL*|libdrm*|libnvidia*|libvulkan*|libgbm*) return 0 ;;  # GPU stack: the host's (one Vulkan loader)
+        # Linux fork: the host's Mesa Vulkan drivers link the host's libwayland-client and need its
+        # newer symbols (wl_display_dispatch_queue_timeout); a bundled older copy loaded first by
+        # SDL3 made every driver fail to load on SteamOS ("doesn't implement VK_KHR_surface").
+        libwayland-*.so*) return 0 ;;
     esac
     return 1
 }

@@ -67,6 +67,8 @@ public:
             entries.pop_front();
         }
     }
+    /// The tick of the oldest copy (0: none); copies retire from the oldest on.
+    std::uint64_t OldestTick() const { return entries.empty() ? 0 : entries.front().tick; }
     std::uint64_t Bytes() const { return bytes; }
 
 private:

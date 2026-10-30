@@ -51,9 +51,14 @@ PLATFORM = 'PC' if WINDOWS else 'Linux/Steam Deck'  # Linux fork: the window tit
 MAX_LOG_LINES = 6000
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 # This build. The launcher checks the GitHub releases at start and offers newer versions.
-VERSION = '1.3.7'
+VERSION = '1.3.8'
 RELEASES_API = 'https://api.github.com/repos/bc160201983/medievil_2019_pc_port/releases/latest'
 RELEASES_PAGE = 'https://github.com/bc160201983/medievil_2019_pc_port/releases'
+# The port's pages (Home and Advanced), opened in the browser.
+LINKS = (('GitHub', 'https://github.com/bc160201983/medievil_2019_pc_port'),
+         ('YouTube', 'https://www.youtube.com/@BilalReloaded'),
+         ('Patreon', 'https://www.patreon.com/c/bilalreloaded'))
+WINDOW_TITLE = '{} (PC) — Port By BilalReloaded · v{}'
 UPDATE_DIR = Path(tempfile.gettempdir()) / 'medievil-update'
 if not WINDOWS:  # Linux fork: releases, version and updates come from the fork
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -164,7 +169,7 @@ INI_DEFAULTS = {'upscaler': 'off', 'preset': '1', 'sharpen': '1', 'sharpness': '
                 'live_resolution': 'auto', 'display_mode': 'windowed', 'vsync': '1', 'fps_limit': '0',
                 'async_shaders': '1', 'deferred_readback': '1', 'stale_readback': '0',
                 'render_resolution': 'native', 'engine_fps': '60', 'fps_default_60': '1', 'fsr1': '0', 'rcas': '1',
-                'rcas_strength': '75', 'frames_queued': '1', 'ue4_quality': 'console', 'cheat_very_hard': '0', 'cheat_double_jumps': '0', 'cheat_menu': '0', 'cheat_infinite_ammo': '0', 'ue4_upscale': 'off', 'ue4_aa': 'taa'}
+                'rcas_strength': '75', 'frames_queued': '1', 'ue4_quality': 'console', 'cheat_very_hard': '0', 'cheat_double_jumps': '0', 'cheat_menu': '0', 'cheat_infinite_ammo': '0', 'ue4_upscale': 'off', 'ue4_aa': 'taa', 'ue4_voice': ''}
 DISPLAY_MODES = [('windowed', ('Windowed',)), ('borderless', ('Borderless',)), ('fullscreen', ('Fullscreen',))]
 FPS_LIMITS = [('30', ('30',)), ('60', ('60',)), ('120', ('120',)), ('240', ('240',)), ('0', ('Unlimited',)),
               ('-1', ('Half display refresh (smoothest)',))]
@@ -201,6 +206,12 @@ PAD_STYLES = {
              'leftstick': 'LS (left stick click)', 'rightstick': 'RS (right stick click)', 'start': 'Menu',
              'back': 'View', 'touchpad': 'Touchpad click', 'guide': 'Xbox button', 'dpup': 'D-pad up',
              'dpdown': 'D-pad down', 'dpleft': 'D-pad left', 'dpright': 'D-pad right', 'misc1': 'Share'},
+    # Linux fork: the Steam Deck's names (its shoulder buttons and stick clicks are L1 R1 L3 R3).
+    'steamdeck': {'a': 'A', 'b': 'B', 'x': 'X', 'y': 'Y', 'leftshoulder': 'L1', 'rightshoulder': 'R1',
+                  'leftstick': 'L3', 'rightstick': 'R3', 'start': 'Menu', 'back': 'View',
+                  'touchpad': 'Trackpad click', 'guide': 'Steam button', 'dpup': 'D-pad up',
+                  'dpdown': 'D-pad down', 'dpleft': 'D-pad left', 'dpright': 'D-pad right',
+                  'misc1': 'Quick access button'},
 }
 
 
@@ -239,6 +250,13 @@ LANGUAGES = [('1', ('English', 'Английский')), ('18', ('English (UK)',
              ('17', ('Portuguese (Brazil)',)), ('12', ('Finnish',)), ('13', ('Swedish',)), ('14', ('Danish',)),
              ('15', ('Norwegian',)), ('19', ('Turkish',)), ('21', ('Arabic',)), ('23', ('Czech',)),
              ('24', ('Hungarian',)), ('25', ('Greek',)), ('26', ('Romanian',))]
+# Spoken language (medievil.ini ue4_voice): '' follows the game language (the game's own map).
+VOICE_LANGUAGES = [('', ('Same as game language',)), ('English(US)', ('English',)), ('French', ('French',)),
+                   ('German', ('German',)), ('Italian', ('Italian',)), ('Spanish', ('Spanish',)),
+                   ('es-MX', ('Spanish (Latin America)',)), ('Portuguese', ('Portuguese',)),
+                   ('pt-BR', ('Portuguese (Brazil)',)), ('Dutch', ('Dutch',)), ('Polish', ('Polish',)),
+                   ('Russian', ('Russian',)), ('Czech', ('Czech',)), ('Greek', ('Greek',)), ('Arabic', ('Arabic',)),
+                   ('Japanese', ('Japanese',))]
 DRAW_PIPE = [('', ('Auto (8+ threads)', 'Авто (8+ потоков)')), ('1', ('On', 'Включён')),
              ('0', ('Off (more stable)', 'Выключен (стабильнее)'))]
 # "Precise" (GOW3_READBACKS=2) left MediEvil on a black screen (issue #15): not offered, and a
@@ -376,6 +394,8 @@ def game_environment(s):
     env['GOW3_PARALLEL_WARMUP'] = '1' if s.get('parallel_warmup', True) else '0'
     env['GOW3_PIPELINE_BINARIES'] = '1' if s.get('pipeline_binary_cache', True) else '0'
     env.setdefault('GOW3_PERF_DIAG', '1' if s.get('perf_diag', False) else '0')
+    if s.get('perf_diag', False):  # Linux fork: which images are created and uploaded each frame
+        env.setdefault('GOW3_IMAGE_STATS', '1')
     for key, name in (('frame_stats', 'GOW3_FRAME_STATS'), ('gpu_profile', 'GOW3_GPU_PROFILE'),
                       ('vk_validation', 'GOW3_VK_VALIDATION'), ('frame_capture_key', 'GOW3_FRAME_CAPTURE_KEY')):
         if s[key]:
@@ -386,6 +406,19 @@ def game_environment(s):
         if value := control_map(s.get('controls', {}), kind):
             env[name] = value
     env.setdefault('GOW3_FPS_LOG', '1')  # FPS and worst frame every 5 s in the log (diagnostics)
+    if not WINDOWS:  # Linux fork: Xbox or Steam Deck pictures in the game's prompts
+        env['GOW3_BUTTON_PROMPTS'] = s.get('pad_style') or 'playstation'
+    if not WINDOWS and s.get('deck_mode') and s.get('deck_steady_clock', True):
+        # Linux fork: Steam Deck mode runs the game on a fixed clock at the Deck frame rate. With
+        # its measured clock a slow frame moved the camera by the whole delay at once (the title
+        # pan jumped ahead several frames, the spider popped in instead of fading); fixed, every
+        # frame advances one step and a heavy moment runs a little slower instead.
+        env['GOW3_FIXED_FRAME_RATE'] = str(s.get('deck_fps') or '30')
+    if not WINDOWS:  # Linux fork: the surround channels in a stereo mix
+        env['GOW3_AUDIO_SURROUND'] = medievil_linux.STEREO_SURROUND_LEVELS.get(s.get('stereo_surround') or 'off', '0')
+    if not WINDOWS and s.get('record_inputs'):  # Linux fork: frame-stamped input recording
+        env['GOW3_PAD_RECORD_AUTO'] = '1'
+        env['GOW3_FIXED_FRAME_RATE'] = '30'
     env.setdefault('GOW3_FRAME_STATS', '1')  # draws, compiles and stalls every 5 s (diagnostics)
     # F12 in the game saves a PNG screenshot of the game's picture.
     env.setdefault('GOW3_SCREENSHOT_DIR', str(screenshots_dir(s)))
@@ -408,6 +441,15 @@ def game_environment(s):
         pass
     env['PYTHONUNBUFFERED'] = '1'
     env['PYTHONIOENCODING'] = 'utf-8'
+    # Linux fork: extra-env.txt beside settings.json, KEY=VALUE per line (# comments), for
+    # diagnostics without a new build (e.g. GOW3_UE4_CVARS=r.VolumetricFog.GridPixelSize=8;...).
+    try:
+        for line in (CONFIG_DIR / 'extra-env.txt').read_text(encoding='utf-8').splitlines():
+            key, sep, value = line.strip().partition('=')
+            if sep and key and not key.startswith('#'):
+                env[key.strip()] = value.strip()
+    except OSError:
+        pass
     return env
 
 
@@ -490,7 +532,7 @@ class Launcher:
         self.banner_source = self.banner_image = None
         self.ui_calls = queue.Queue()  # work for the Tk thread from helper threads
         self.mod_order, self.mod_vars, self.patch_vars = [], {}, {}
-        root.title(f'{APP_NAME} ({PLATFORM})')
+        root.title(WINDOW_TITLE.replace('(PC)', f'({PLATFORM})').format(APP_NAME, VERSION))
         if sys.platform == 'win32':
             try:  # the taskbar shows this window's icon, not Python's
                 import ctypes
@@ -511,7 +553,9 @@ class Launcher:
         self.show('home')
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.after(100, self.drain_output)
-        if self.app.get('update_check', True):
+        if not WINDOWS:  # Linux fork: at launch and every 30 minutes
+            root.after(1500, lambda: medievil_linux.periodic_update_check(self))
+        elif self.app.get('update_check', True):
             root.after(1500, lambda: threading.Thread(target=self.check_update, daemon=True).start())
 
     def px(self, size):
@@ -542,6 +586,8 @@ class Launcher:
 
     def set_icon(self):
         game_icon = Path(self.var('game_dir', 'app').get() or '.') / 'sce_sys' / 'icon0.png'
+        if not WINDOWS:  # Linux fork: the launcher's own icon (Sir Daniel), not the game's
+            game_icon = PORT_DIR / 'launcher' / 'medievil.png'
         try:
             from PIL import Image
             ico = CONFIG_DIR / 'game_icon.ico'
@@ -597,7 +643,8 @@ class Launcher:
         s = ttk.Style(self.root)
         s.theme_use('clam')
         self.check_images()
-        s.element_create('Bb.indicator', 'image', self.check_off, ('selected', self.check_on), sticky='')
+        locked = medievil_linux.locked_looks(self, theme) if not WINDOWS else ()  # Linux fork: greyed out
+        s.element_create('Bb.indicator', 'image', self.check_off, *locked, ('selected', self.check_on), sticky='')
         s.layout('TCheckbutton', [('Checkbutton.padding', {'sticky': 'nswe', 'children': [
             ('Bb.indicator', {'side': 'left', 'sticky': ''}),
             ('Checkbutton.focus', {'side': 'left', 'sticky': 'w', 'children': [
@@ -622,6 +669,14 @@ class Launcher:
         s.configure('TCombobox', arrowcolor=MUTED, foreground=TEXT, padding=4)
         s.map('TCombobox', fieldbackground=[('readonly', CARD)], foreground=[('readonly', TEXT)],
               selectbackground=[('readonly', CARD)], selectforeground=[('readonly', TEXT)])
+        if not WINDOWS:  # Linux fork: settings Steam Deck mode locks are greyed out
+            s.map('TCombobox', fieldbackground=[('disabled', PANEL), ('readonly', CARD)],
+                  foreground=[('disabled', '#6e6878'), ('readonly', TEXT)],
+                  selectbackground=[('disabled', PANEL), ('readonly', CARD)],
+                  selectforeground=[('disabled', '#6e6878'), ('readonly', TEXT)],
+                  arrowcolor=[('disabled', LINE)], bordercolor=[('disabled', LINE)])
+            s.map('TLabel', foreground=[('disabled', '#6e6878')], background=[('disabled', PANEL)])
+            s.map('TCheckbutton', background=[('active', PANEL)], foreground=[('disabled', '#6e6878')])
         s.configure('TEntry', foreground=TEXT, insertcolor=TEXT, padding=4)
         s.configure('TSpinbox', foreground=TEXT, arrowcolor=MUTED, insertcolor=TEXT, padding=4)
         s.configure('TButton', background=CARD, foreground=TEXT, padding=(12, 6), borderwidth=1,
@@ -698,7 +753,7 @@ class Launcher:
         r = self.next_row(parent)
         self.title_cell(parent, title, restart).grid(row=r, column=0, sticky='w', padx=(0, 18), pady=(8, 0))
         widget.grid(row=r, column=1, sticky='w', pady=(5, 0))
-        if hint:
+        if hint and WINDOWS:  # Linux fork: no notes under the options
             self.ttk.Label(parent, text=hint, style='Muted.TLabel', wraplength=self.px(640), justify='left').grid(
                 row=r + 1, column=0, columnspan=2, sticky='w', pady=(1, 2))
         return widget
@@ -710,6 +765,8 @@ class Launcher:
         return self.row(parent, title, box, hint, restart)
 
     def note(self, parent, text, top=12):
+        if not WINDOWS:  # Linux fork: no notes under the options
+            return
         self.ttk.Label(parent, text=text, style='Muted.TLabel', wraplength=self.px(680), justify='left').grid(
             row=self.next_row(parent), column=0, columnspan=2, sticky='w', pady=(top, 0))
 
@@ -791,6 +848,8 @@ class Launcher:
                             ('game', _('Game', 'Игра')), ('patches', _('Patches', 'Патчи')),
                             ('mods', _('Mods', 'Моды')), ('controls', _('Controls', 'Управление')),
                             ('advanced', _('Advanced', 'Дополнительно')), ('log', _('Log', 'Журнал'))):
+            if not WINDOWS and name in medievil_linux.HIDDEN_PAGES:  # Linux fork
+                continue
             item = tk.Label(side, text='    ' + title, bg=BG, fg=TEXT, anchor='w', font=self.f('head', 13),
                             pady=8, cursor='hand2', bd=0)
             item.looks = self.nav_images(title)
@@ -807,6 +866,9 @@ class Launcher:
                                                'В игре: Insert или R3+L2\nоткрывает меню порта.'),
                                   bg=BG, fg=MUTED, font=self.f('body', 9), justify='left', wraplength=self.px(210))
         self.side_note.pack(anchor='w', padx=22, pady=(0, 18))
+        if not WINDOWS:  # Linux fork: GitHub, update button and version at the bottom
+            self.side_note.pack_configure(pady=(0, 12))
+            self.corner = medievil_linux.Corner(self, side, BG, TEXT, MUTED, GOLD, VERSION, _)
 
         right = tk.Frame(self.root, bg=PANEL)
         right.pack(side='left', fill='both', expand=True)
@@ -926,7 +988,22 @@ class Launcher:
         flags = ttk.Frame(quick)
         flags.grid(row=4, column=0, columnspan=4, sticky='w', pady=(6, 0))
         for key, title in (('vsync', _('VSync')), ('show_fps', _('Show performance overlay'))):
-            ttk.Checkbutton(flags, text=title, variable=self.var(key, 'ini')).pack(side='left', padx=(0, 28))
+            box = ttk.Checkbutton(flags, text=title, variable=self.var(key, 'ini'))
+            box.pack(side='left', padx=(0, 28))
+            if not WINDOWS:  # Linux fork: Steam Deck mode locks some of these
+                medievil_linux.track_widget(self, key, box)
+        self.link_buttons(quick).grid(row=5, column=0, columnspan=4, sticky='w', pady=(14, 0))
+
+    def link_buttons(self, parent):
+        """GitHub, YouTube and Patreon buttons that open the port's pages in the browser."""
+        ttk = self.ttk
+        holder = ttk.Frame(parent)
+        for index, (name, url) in enumerate(LINKS):
+            ttk.Button(holder, text=name, command=lambda u=url: webbrowser.open(u)).pack(
+                side='left', padx=(0 if index == 0 else 8, 0))
+        ttk.Label(holder, text=_('Support the port on Patreon', 'Поддержите порт на Patreon'),
+                  style='Muted.TLabel').pack(side='left', padx=12)
+        return holder
 
     def draw_banner(self):
         """The cover art of the selected dump (sce_sys/pic1.png) under the title."""
@@ -1033,9 +1110,10 @@ class Launcher:
         self.row(f, _('Display mode'), self.choice(f, 'display_mode', 'ini', DISPLAY_MODES),
                  _('Borderless covers the screen without changing the display mode.'))
         self.check(f, 'vsync', 'ini', _('VSync'), _('Off allows tearing for the lowest latency.'))
-        self.check(f, 'hdr', 'app', _('Allow HDR output', 'Разрешить HDR'),
-                   _('When HDR is on in Windows and the display supports it.',
-                     'Если HDR включён в Windows и монитор его поддерживает.'))
+        if WINDOWS:  # Linux fork: hidden (medievil_linux.HIDDEN_APP)
+            self.check(f, 'hdr', 'app', _('Allow HDR output', 'Разрешить HDR'),
+                       _('When HDR is on in Windows and the display supports it.',
+                         'Если HDR включён в Windows и монитор его поддерживает.'))
         self.section(f, _('Scaling and sharpening'))
         self.check(f, 'fsr1', 'ini', _('Upscale with FSR 1'),
                    _('Enlarges a smaller game image to the window. With Render resolution 720p (Performance) '
@@ -1060,8 +1138,9 @@ class Launcher:
         holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(6, 0))
         ttk.Button(holder, text=_('Open screenshots folder'),
                    command=lambda: self.open_path(screenshots_dir(self.app))).pack(side='left')
-        ttk.Label(holder, text=_('Press F12 in the game: a PNG of the game picture at its full resolution.'),
-                  style='Muted.TLabel').pack(side='left', padx=10)
+        if WINDOWS:  # Linux fork: no notes under the options
+            ttk.Label(holder, text=_('Press F12 in the game: a PNG of the game picture at its full resolution.'),
+                      style='Muted.TLabel').pack(side='left', padx=10)
 
     def build_performance(self):
         f = self.scrolled_page('performance', _('Performance'), _('Frame rate and speed options.'))
@@ -1097,9 +1176,10 @@ class Launcher:
                    'slower graphics cards; Quality looks close to full resolution. Applied at start.'),
                  restart=True)
         self.section(f, _('Shaders'))
-        self.check(f, 'pipeline_binary_cache', 'app', _('Use pipeline binary cache (A/B test)'),
-                   _('Reuse saved Vulkan pipelines. Disable to compare FPS with normal compilation. '
-                     'Takes effect on the next launch; saved caches are preserved.'))
+        if WINDOWS:  # Linux fork: hidden (medievil_linux.HIDDEN_APP)
+            self.check(f, 'pipeline_binary_cache', 'app', _('Use pipeline binary cache (A/B test)'),
+                       _('Reuse saved Vulkan pipelines. Disable to compare FPS with normal compilation. '
+                         'Takes effect on the next launch; saved caches are preserved.'))
         self.check(f, 'background_warmup', 'app', _('Load shader cache in the background'),
                    _('The game opens at once and the saved shaders load while you play; a small note in the '
                      'corner shows the progress. Switch it off to wait on the loading screen instead.'))
@@ -1109,6 +1189,9 @@ class Launcher:
         self.check(f, 'parallel_warmup', 'app', _('Fast shader cache loading (parallel)'),
                    _('Loading screen only: builds the cached pipelines on several CPU threads.'))
         self.section(f, _('GPU data'))
+        if not WINDOWS:  # Linux fork: the GPU data path is fixed (medievil_linux.HIDDEN_*)
+            self.safe_gpu_mode(f)
+            return
         self.check(f, 'stale_readback', 'ini', _('Game reads GPU data without waiting (big FPS gain)'),
                    _('About 40 to 66 FPS in a heavy scene. Needs deferred GPU readbacks. Switch it off if lighting '
                      'or objects look wrong.'), restart=True)
@@ -1119,6 +1202,9 @@ class Launcher:
         self.row(f, _('GPU readbacks', 'Чтение данных GPU'), self.choice(f, 'readbacks', 'app', READBACKS),
                  _('How exactly data the GPU writes is copied back for the game.',
                    'Насколько точно данные, записанные GPU, возвращаются игре.'))
+        self.safe_gpu_mode(f)
+
+    def safe_gpu_mode(self, f):
         self.check(f, 'vulkan_compat', 'app', _('Safe GPU mode (older AMD GPUs)',
                                                 'Безопасный режим GPU (старые видеокарты AMD)'),
                    _('For Radeon RX 400/500 and Vega GPUs that crash when the main menu loads: runs without newer '
@@ -1144,6 +1230,9 @@ class Launcher:
         self.build_save_backups(f)
         self.section(f, _('Language'))
         self.row(f, _('Game language', 'Язык игры'), self.choice(f, 'language', 'app', LANGUAGES))
+        self.row(f, _('Voice language'), self.choice(f, 'ue4_voice', 'ini', VOICE_LANGUAGES),
+                 _('The spoken language: 15 are in the game. "Same as game language" follows the game '
+                   'language (English voices for languages without a dub). Applied at start.'), restart=True)
         self.section(f, _('Cheats'))
         self.check(f, 'cheat_menu', 'ini', _('Developer cheat menu (R3 in the game)'),
                    _("MediEvil's own debug menu, left in the game by its developers: level select, complete "
@@ -1350,10 +1439,12 @@ class Launcher:
         style = self.app.get('pad_style') if self.app.get('pad_style') in PAD_STYLES else 'playstation'
         self.pad_style = tk.StringVar(value=style)
         names = ttk.Frame(f)
-        for value, label in (('playstation', 'PlayStation'), ('xbox', 'Xbox')):
+        for value, label in (('playstation', 'PlayStation'), ('xbox', 'Xbox'), ('steamdeck', 'Steam Deck')):
             ttk.Radiobutton(names, text=label, value=value, variable=self.pad_style,
                             command=self.relabel_pad_controls).pack(side='left', padx=(0, 14))
-        self.row(f, _('Gamepad names'), names)
+        # Linux fork: the same choice draws the game's own button prompts (scripts/button_prompts.py).
+        self.row(f, _('Button pictures'), names,
+                 _('The buttons named here and shown in the game\'s prompts and HUD (applied at start).'))
         self.row(f, _('Stick range'), self.choice(f, 'stick_range', 'app', STICK_RANGES),
                  _('How far the sticks must tilt for a full push. Lower it if your character moves slowly '
                    'with the stick pushed all the way (some hall-effect sticks never reach the edge).'))
@@ -1446,6 +1537,8 @@ class Launcher:
         self.check(f, 'update_check', 'app', _('Check for updates when the launcher opens'),
                    _('Asks GitHub for a newer release; when there is one, the sidebar offers to download and '
                      'install it (saves, settings and mods are kept).'))
+        self.section(f, _('Links', 'Ссылки'))
+        self.link_buttons(f).grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(6, 0))
         self.section(f, _('Files'))
         holder = ttk.Frame(f)
         holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(6, 0))
@@ -1454,9 +1547,12 @@ class Launcher:
         holder = ttk.Frame(f)
         holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(10, 0))
         ttk.Button(holder, text=_('Clear shader cache', 'Очистить кэш шейдеров'), command=self.clear_cache).pack(side='left')
-        ttk.Label(holder, text=_('If the game only shows a black screen, this usually helps.',
-                                 'Если игра показывает только чёрный экран, обычно это помогает.'),
-                  style='Muted.TLabel').pack(side='left', padx=10)
+        if WINDOWS:  # Linux fork: no notes under the options
+            ttk.Label(holder, text=_('If the game only shows a black screen, this usually helps.',
+                                     'Если игра показывает только чёрный экран, обычно это помогает.'),
+                      style='Muted.TLabel').pack(side='left', padx=10)
+        if not WINDOWS:  # Linux fork: no diagnostics section (medievil_linux.HIDDEN_APP)
+            return
         # Diagnostics: for development, folded away until asked for.
         toggle = ttk.Label(f, text='', style='Section.TLabel', cursor='hand2')
         toggle.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(22, 2))
@@ -1509,7 +1605,7 @@ class Launcher:
         folder = self.var('game_dir', 'app').get()
         info = game_info(folder)
         title = info[0] if info else APP_NAME
-        self.root.title(f'{title} ({PLATFORM})')
+        self.root.title(WINDOW_TITLE.replace('(PC)', f'({PLATFORM})').format(title, VERSION))
         self.side_title.configure(text=title.upper())
         if self.current_page == 'patches':
             self.refresh_game_patches()
@@ -1844,6 +1940,11 @@ class Launcher:
         self.ui_calls.put(show)
 
     def offer_update(self, version, url, page):
+        if not WINDOWS:  # Linux fork: the download button in the sidebar corner glows
+            self.corner.offer(version, url, page)
+            if not self.process:
+                self.status.configure(text=_('Version {} is available.', 'Доступна версия {}.').format(version), fg=TEXT)
+            return
         if self.update_box:
             return
         tk, ttk = self.tk, self.ttk
@@ -1935,14 +2036,10 @@ class Launcher:
             command = f'"{appimage}"'
         else:
             command = f'"{sys.executable}" "{Path(__file__).resolve()}"'
-        icon = CONFIG_DIR / 'medievil.png'
+        icon = CONFIG_DIR / 'launcher-icon.png'
         try:
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            for source in (Path(self.app.get('game_dir') or '.') / 'sce_sys' / 'icon0.png',
-                           PORT_DIR / 'launcher' / 'medievil.png'):
-                if source.is_file():
-                    shutil.copyfile(source, icon)
-                    break
+            shutil.copyfile(PORT_DIR / 'launcher' / 'medievil.png', icon)
             entry = ('[Desktop Entry]\nType=Application\nName=MediEvil\nComment=MediEvil (PS4) for Linux/Steam Deck\n'
                      f'Exec={command}\nIcon={icon}\nTerminal=false\nCategories=Game;\n')
             data_home = Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local' / 'share')
@@ -2092,6 +2189,11 @@ def main():
     args = sys.argv[1:]
     if args and args[0] in ('--run', '--script'):
         sys.exit(run_role(args))
+    if not WINDOWS:  # Linux fork: Steam Deck mode's newer values, applied to older settings once
+        saved = load_json(CONFIG_FILE, {})
+        if saved and (medievil_linux.deck_updates(saved, ini_path()) |
+                      medievil_linux.hidden_defaults(saved, ini_path())):
+            CONFIG_FILE.write_text(json.dumps(saved, indent=2, ensure_ascii=False), encoding='utf-8')
     settings = {**APP_DEFAULTS, **load_json(CONFIG_FILE, {})}
     LANG = settings.get('ui_language') or windows_language()
     if WINDOWS and args[:1] == ['--install-update'] and len(args) == 3:

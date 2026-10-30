@@ -170,7 +170,11 @@ static ABI int32_t thread_id(void) {
 #ifdef _WIN32
     return (int32_t)GetCurrentThreadId();
 #else
-    return (int32_t)syscall(SYS_gettid);
+    /* UE4 asks for it on every IsInRenderingThread()-style check: a system call each time took
+     * most of MediEvil's render thread. A thread's id never changes. */
+    static __thread int32_t id;
+    if (!id) id=(int32_t)syscall(SYS_gettid);
+    return id;
 #endif
 }
 static ABI int32_t thread_name(void *thread, char *name) {
@@ -354,6 +358,34 @@ static ABI int32_t ngs2_render(uintptr_t system, Ngs2RenderBuffer *buffers, uint
     return 0;
 }
 static ABI int32_t ngs2_unsupported_waveform(void) { return (int32_t)0x804A0200; } /* invalid waveform */
+/* Linux fork: the panning helpers stay no-ops (the caller's volume matrix is left as it was), but
+ * GOW3_AUDIO_TRACE=1 logs what the game asks of them: the speaker layout of PanInit and, for the
+ * first calls of PanGetVolumeMatrix, its parameters and the matrix it would get back. Sound
+ * effects sound tinny while music is fine; this shows whether they are panned through here. */
+static int ngs2_trace_on(void) { static int on=-1; if (on<0) { const char *e=getenv("GOW3_AUDIO_TRACE"); on=e && e[0]=='1'; } return on; }
+static ABI int32_t ngs2_pan_init(void *work, const float *angles, float unit, uint32_t speakers) {
+    if (ngs2_trace_on()) {
+        printf("NGS2 trace: PanInit work %p unit %g speakers %u angles",work,(double)unit,speakers);
+        for (uint32_t i=0;angles && i<speakers && i<8;++i) printf(" %g",(double)angles[i]);
+        printf("\n"); fflush(stdout);
+    }
+    return 0;
+}
+static ABI int32_t ngs2_pan_matrix(void *work, const uint32_t *params, uint32_t count, uint32_t format, float *matrix) {
+    static int calls;
+    if (ngs2_trace_on() && __atomic_fetch_add(&calls,1,__ATOMIC_RELAXED)<40) {
+        printf("NGS2 trace: PanGetVolumeMatrix work %p count %u format %u params",work,count,format);
+        for (uint32_t i=0;params && i<count && i<2;++i) {
+            float f[4]; memcpy(f,params+i*4,sizeof(f));
+            printf(" [%g %g %g %g | %08x %08x %08x %08x]",(double)f[0],(double)f[1],(double)f[2],(double)f[3],
+                   params[i*4+4],params[i*4+5],params[i*4+6],params[i*4+7]);
+        }
+        printf(" matrix as left");
+        for (uint32_t i=0;matrix && i<count*8 && i<16;++i) printf(" %g",(double)matrix[i]);
+        printf("\n"); fflush(stdout);
+    }
+    return 0;
+}
 
 /* ---- Json2 (C++ ABI, this in rdi). Parsing reports failure; values read as null/empty. ---- */
 static unsigned char json_null[64];
@@ -542,7 +574,7 @@ static const RuntimeExport exports[]={
     {"sceNgs2RackCreateWithAllocator",ngs2_rack_create}, {"sceNgs2RackDestroy",ok_noop},
     {"sceNgs2RackGetVoiceHandle",ngs2_voice_handle}, {"sceNgs2VoiceControl",ok_noop},
     {"sceNgs2VoiceGetState",ngs2_voice_state}, {"sceNgs2VoiceGetStateFlags",ngs2_voice_flags},
-    {"sceNgs2SystemRender",ngs2_render}, {"sceNgs2PanInit",ok_noop}, {"sceNgs2PanGetVolumeMatrix",ok_noop},
+    {"sceNgs2SystemRender",ngs2_render}, {"sceNgs2PanInit",ngs2_pan_init}, {"sceNgs2PanGetVolumeMatrix",ngs2_pan_matrix},
     {"sceNgs2ParseWaveformData",ngs2_unsupported_waveform}, {"sceNgs2CalcWaveformBlock",ngs2_unsupported_waveform},
     {"_ZN3sce4Json11InitializerC1Ev",json_nothing}, {"_ZN3sce4Json11InitializerD1Ev",json_nothing},
     {"_ZN3sce4Json11Initializer10initializeEPKNS0_13InitParameterE",json_initialize},

@@ -165,6 +165,8 @@ public:
     bool GetVideoData(AvPlayerFrameInfo& video_info);
     bool GetVideoData(AvPlayerFrameInfoEx& video_info);
     u64 CurrentTime();
+    static s64 AudioLeadMs();
+    static bool PacedAudio();
     bool IsActive();
 
 private:
@@ -224,6 +226,7 @@ private:
 
     AvPlayerQueue<Frame> m_audio_frames;
     AvPlayerQueue<Frame> m_video_frames;
+    void MovieStats(bool shown, s64 late_ms, u32 skipped); // Linux fork: GOW3_FRAME_STATS
 
     std::optional<Frame> m_current_video_frame;
     std::optional<Frame> m_current_audio_frame;
@@ -255,6 +258,8 @@ private:
     std::optional<std::chrono::high_resolution_clock::time_point> m_start_time{};
     std::chrono::high_resolution_clock::time_point m_pause_time{};
     std::chrono::high_resolution_clock::duration m_pause_duration{};
+    /// Linux fork: all pauses since Start (the wall clock of PacedAudio).
+    std::chrono::high_resolution_clock::duration m_wall_pause{};
 };
 
 } // namespace Libraries::AvPlayer

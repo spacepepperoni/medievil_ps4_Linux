@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <mutex>
 #ifdef _WIN32
 // gow3 (Windows): no signals. The loader's exception handler resumes the faulting thread
 // in gow3_longjmp (src/compat_win.c: no unwinding through the faulting frames).
@@ -120,6 +121,49 @@ inline std::atomic<std::uint64_t> reduced_draws{0}, scene_draws{0};
 /// for host copies before a submission or fence, and for GPU ticks.
 inline std::atomic<std::uint64_t> sync_recording_ns{0}, host_copies_wait_ns{0}, tick_wait_ns{0},
     copy_threads_wait_ns{0}, host_copy_waits{0};
+/// Linux fork: host copy waits by caller (GOW3_FRAME_STATS prints them): which fences and writes
+/// the GPU thread waits at. A caller sets its site for the scope of the wait (WaitSite).
+enum WaitSiteId : int { SiteSubmit, SiteEop, SiteComputeFence, SiteWriteData, SiteEos, SiteAscWriteData,
+                        SiteAscReleaseMem, SiteDownload, SiteSignalInline, SiteFlip, SiteCount };
+inline const char* const wait_site_names[SiteCount] = {"submit/other", "eop", "compute fence", "write data", "eos",
+                                                       "asc write data", "asc release mem", "download",
+                                                       "signal inline", "flip"};
+inline std::atomic<std::uint64_t> site_wait_ns[SiteCount]{}, site_waits[SiteCount]{};
+inline thread_local int wait_site = SiteSubmit;
+struct WaitSite {
+    int previous;
+    explicit WaitSite(int site) : previous{wait_site} { wait_site = site; }
+    ~WaitSite() { wait_site = previous; }
+};
+/// Linux fork: GPU-written buffer data copied back for the CPU (a CPU access to a GPU-modified
+/// page): each one waits for the GPU to finish all submitted work. Busiest 64 KiB blocks kept.
+inline std::atomic<std::uint64_t> buffer_downloads{0}, buffer_download_bytes{0}, buffer_download_wait_ns{0},
+    buffer_downloads_mapped{0}, buffer_downloads_deferred{0};
+/// Linux fork: the CPU reads mapped GPU memory: each submission ends with a barrier making its
+/// writes visible to the host (BufferCache::DownloadMapped).
+inline std::atomic<bool> host_read_barrier{false};
+/// Set by a buffer write since the last submission: only then is the barrier needed.
+inline std::atomic<bool> host_read_pending{false};
+struct DownloadBlock { std::uint64_t block, count; };
+/// A spin lock: downloads may run inside a fault handler.
+struct SpinLock {
+    std::atomic_flag flag = ATOMIC_FLAG_INIT;
+    void lock() { while (flag.test_and_set(std::memory_order_acquire)) {} }
+    void unlock() { flag.clear(std::memory_order_release); }
+};
+inline SpinLock download_blocks_mutex;
+inline DownloadBlock download_blocks[8]{};
+inline void NoteDownloadBlock(std::uint64_t address) {
+    std::lock_guard lock{download_blocks_mutex};
+    const std::uint64_t block = address >> 16;
+    DownloadBlock* least = &download_blocks[0];
+    for (auto& b : download_blocks) {
+        if (b.block == block && b.count) { ++b.count; return; }
+        if (b.count < least->count) least = &b;
+    }
+    if (!least->count) *least = {block, 1};
+    else ++least->count; // stays approximate: the least busy slot absorbs new blocks
+}
 struct WaitTimer {
     std::atomic<std::uint64_t>& total;
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();

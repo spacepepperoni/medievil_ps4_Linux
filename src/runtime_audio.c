@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <pthread.h>
 #include <time.h>
 #include <SDL3/SDL.h>
@@ -31,6 +32,8 @@
 
 typedef struct {
     int used, type, channels, is_float, frames, sample_bytes, std_layout;
+    int bad_reported;                          /* Linux fork: NaN/infinite samples seen */
+    unsigned long long bad_samples, bad_next_report;
     int out_channels;               /* channels given to SDL: 2 when the port downmixes 7.1 */
     int32_t volume[8];
     SDL_AudioStream *stream;
@@ -112,7 +115,7 @@ static ABI int32_t audio_open(int32_t user, int32_t type, int32_t index, uint32_
     Port *p=&ports[id];
     memset(p,0,sizeof(*p));
     pthread_mutex_init(&p->lock,NULL);
-    p->used=1; p->type=type; p->channels=channels[format]; p->is_float=format>=3 && format!=6;
+    p->used=1; p->bad_reported=0; p->bad_samples=0; p->bad_next_report=1024; p->type=type; p->channels=channels[format]; p->is_float=format>=3 && format!=6;
     p->sample_bytes=p->is_float ? 4 : 2; p->frames=(int)length; p->std_layout=format>=6;
     for (int c=0;c<8;++c) p->volume[c]=VOLUME_0DB;
     p->out_channels=p->channels;
@@ -172,13 +175,25 @@ static float soft_limit(float v) {
 }
 static int downmix_stereo(const Port *p, unsigned char *buffer) {
     const float k=0.70710678f;
+    /* Linux fork: the surrounds at -9 dB, not -3 dB. MediEvil's sound engine (Wwise, told the
+       port has 8 channels) puts delayed copies of positioned sounds into the side and back
+       channels (side left ~8 ms after front left, side right ~37 ms after front right): folded
+       in at -3 dB they sounded like every sound effect played twice. GOW3_AUDIO_SURROUND sets the
+       level, 0 (fronts and centre only) to 0.71 (the -3 dB fold). */
+    static float ks=-1.0f;
+    if (ks<0.0f) {
+        const char *e=getenv("GOW3_AUDIO_SURROUND");
+        ks=e ? (float)atof(e) : 0.35f;
+        if (ks<0.0f || ks>1.0f) ks=0.35f;
+        printf("Runtime: stereo fold of the surround channels at %.2f\n",(double)ks);
+    }
     for (int f=0;f<p->frames;++f) {
         float c[8];
         for (int i=0;i<8;++i) {
             if (p->is_float) memcpy(&c[i],buffer+((size_t)f*8+(size_t)i)*4,4);
             else { int16_t v; memcpy(&v,buffer+((size_t)f*8+(size_t)i)*2,2); c[i]=(float)v/32768.0f; }
         }
-        const float l=soft_limit(c[0]+k*c[2]+k*(c[6]+c[4])), r=soft_limit(c[1]+k*c[2]+k*(c[7]+c[5]));
+        const float l=soft_limit(c[0]+k*c[2]+ks*(c[6]+c[4])), r=soft_limit(c[1]+k*c[2]+ks*(c[7]+c[5]));
         if (p->is_float) { memcpy(buffer+(size_t)f*8,&l,4); memcpy(buffer+(size_t)f*8+4,&r,4); }
         else {
             const int16_t sl=(int16_t)(l*32767.0f), sr=(int16_t)(r*32767.0f);
@@ -205,8 +220,24 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
             int target=p->channels==8 && !p->std_layout ? remap[c] : c;
             size_t from=f*(size_t)p->channels+(size_t)c, to=f*(size_t)p->channels+(size_t)target;
             float gain=(float)p->volume[c]/VOLUME_0DB;
-            if (p->is_float) { float v; memcpy(&v,(const char *)data+from*4,4); v*=gain; memcpy(converted+to*4,&v,4); }
+            if (p->is_float) {
+                float v; memcpy(&v,(const char *)data+from*4,4);
+                /* Linux fork: a NaN or infinity from the game's mixer would be a click and then
+                 * garbage at the device; it goes out as silence and is reported (MediEvil: the
+                 * sound popped, then stayed silent until the level was restarted). */
+                if (!isfinite(v)) { v=0.0f; ++p->bad_samples; }
+                v*=gain; memcpy(converted+to*4,&v,4);
+            }
             else { int16_t v; memcpy(&v,(const char *)data+from*2,2); v=(int16_t)((float)v*gain); memcpy(converted+to*2,&v,2); }
+        }
+        if (p->bad_samples && !p->bad_reported) {
+            p->bad_reported=1;
+            printf("Audio: port %d received NaN/infinite samples from the game (%llu so far); sent as silence\n",
+                   (int)(p-ports),(unsigned long long)p->bad_samples);
+            fflush(stdout);
+        } else if (p->bad_samples>=p->bad_next_report) {
+            printf("Audio: port %d, %llu NaN/infinite samples so far\n",(int)(p-ports),(unsigned long long)p->bad_samples);
+            p->bad_next_report=p->bad_samples*4;
         }
         if (p->dump) fwrite(converted,1,bytes,p->dump);
         if (p->stats) {
@@ -297,7 +328,19 @@ static ABI int32_t audio_state(int32_t handle, PortState *state) {
     switch (p->type) {
     case 2: case 3: state->output=0x40; state->channel=1; break;          /* headphone */
     case 4: state->output=0x04; state->channel=1; state->volume=127; break; /* pad speaker */
-    default: state->output=0x01; state->channel=(uint8_t)(p->channels>2 ? 2 : p->channels); break;
+    default: {
+        /* Linux fork: the port's real channel count. Reported as 2, the game's sound engine
+           (Wwise) folded its surround and positioned sounds into stereo itself with a matrix
+           downmix: a phase-inverted copy in the other ear about 11 ms later, which sounded
+           doubled and hollow on headphones (zombies, voices). Told 8, it mixes discrete 7.1 and
+           this port folds the surrounds into left and right in phase (downmix_stereo).
+           GOW3_AUDIO_PORT_CHANNELS=2: report 2 as before. */
+        static int reported=-1;
+        if (reported<0) { const char *e=getenv("GOW3_AUDIO_PORT_CHANNELS"); reported=e && e[0]=='2' ? 2 : 8; }
+        state->output=0x01;
+        state->channel=(uint8_t)(p->channels>2 ? (reported==2 ? 2 : p->channels) : p->channels);
+        break;
+    }
     }
     return 0;
 }

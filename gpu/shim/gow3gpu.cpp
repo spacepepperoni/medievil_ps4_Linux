@@ -36,6 +36,7 @@ extern "C" {
 // runtime_memory.c
 int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
 int runtime_memory_write_backing(uintptr_t address, const void* data, uint64_t size);
+int runtime_memory_read_backing(uintptr_t address, void* data, uint64_t size);
 uint64_t runtime_memory_clamp(uintptr_t address, uint64_t size);
 int runtime_memory_region(uintptr_t address, uintptr_t* start, uintptr_t* end, int* mapped);
 void runtime_memory_gpu_protect(uintptr_t address, uint64_t size, int read, int write);
@@ -113,7 +114,11 @@ static void CopySparseSerial(VAddr source, u8* dest, u64 size) {
             end = source + size;
         }
         const u64 n = std::min<u64>(size, end - source);
-        if (mapped) std::memcpy(dest, reinterpret_cast<const void*>(source), n);
+        // Linux fork: through the backing view, under the region lock: a copy thread reading
+        // the guest mapping directly crashed when the page was protected or the game released
+        // it meanwhile (MediEvil, as a cinematic ended: signal 11 in CopySparseMemory).
+        if (mapped && runtime_memory_read_backing(source, dest, n)) {
+        } else if (mapped) std::memcpy(dest, reinterpret_cast<const void*>(source), n);
         else std::memset(dest, 0, n);
         source += n; dest += n; size -= n;
     }
@@ -128,6 +133,9 @@ void MemoryManager::CopySparseMemory(VAddr source, u8* dest, u64 size) {
         const u64 offset = i * Chunk;
         CopySparseSerial(source + offset, dest + offset, std::min(Chunk, size - offset));
     });
+}
+bool MemoryManager::TryReadBacking(const void* address, void* data, u64 size) {
+    return runtime_memory_read_backing(reinterpret_cast<uintptr_t>(address), data, size) != 0;
 }
 bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
     Gow3WriteLog::Note(reinterpret_cast<uintptr_t>(address), data, size, Gow3WriteLog::Backing);
@@ -327,6 +335,25 @@ u32 ConsumeGameOnlyScreenshotRequests() { return 0; }
 u32 ConsumeWithOverlaysScreenshotRequests() { return 0; }
 ScreenshotRequests ConsumeScreenshotRequests() { return {}; }
 } // namespace VideoCore
+
+// Linux fork: when the video decoder last finished a picture (steady clock, ns).
+static std::atomic<int64_t> movie_frame_ns{0};
+extern "C" void gow3gpu_movie_frame(void) {
+    movie_frame_ns.store(std::chrono::steady_clock::now().time_since_epoch().count(),
+                         std::memory_order_relaxed);
+}
+/// A movie is playing: a picture was decoded within the last quarter second.
+bool Gow3MoviePlaying() {
+    const int64_t last = movie_frame_ns.load(std::memory_order_relaxed);
+    return last && std::chrono::steady_clock::now().time_since_epoch().count() - last < 250000000;
+}
+
+namespace Libraries::VideoOut {
+void FramePosition(u32* segment, u32* frame); // Linux fork: driver.cpp
+}
+extern "C" void gow3gpu_frame_position(uint32_t* segment, uint32_t* frame) {
+    Libraries::VideoOut::FramePosition(segment, frame);
+}
 
 extern "C" int gow3gpu_overlay_captures_input(void) {
     return Gow3Overlay::CapturesInput() ? 1 : 0;

@@ -107,21 +107,26 @@ def read_index(path):
     return entries
 
 
+def read_entry(pak, entry):
+    """The data of one index entry (stored or zlib-compressed)."""
+    offset, size, compression, blocks = entry
+    with open(pak, 'rb') as f:
+        if not compression:
+            f.seek(offset + 53)  # the entry header in front of the data
+            return f.read(size)
+        data = bytearray()
+        for start, end in blocks:
+            f.seek(offset + start)
+            data += zlib.decompress(f.read(end - start))
+        return bytes(data)
+
+
 def read_file(game, name):
     """A file of the game's own paks (stored or zlib-compressed)."""
     for pak in sorted(paks_dir(game).glob('pakchunk*-ps4.pak')):
         entries = read_index(pak)
         if name in entries:
-            offset, size, compression, blocks = entries[name]
-            with open(pak, 'rb') as f:
-                if not compression:
-                    f.seek(offset + 53)  # the entry header in front of the data
-                    return f.read(size)
-                data = bytearray()
-                for start, end in blocks:
-                    f.seek(offset + start)
-                    data += zlib.decompress(f.read(end - start))
-                return bytes(data)
+            return read_entry(pak, entries[name])
     raise FileNotFoundError(name)
 
 
@@ -163,13 +168,16 @@ def set_section(text, section, values):
     return head + sep + '\n'.join(body + lines[section_end:])
 
 
-def set_values(ini, values, engine=None):
-    """Sets keys in [SystemSettings] (console variables) and [/Script/Engine.Engine]."""
+def set_values(ini, values, engine=None, physics=None):
+    """Sets keys in [SystemSettings] (console variables), [/Script/Engine.Engine] and
+    [/Script/Engine.PhysicsSettings]."""
     text = ini.decode('utf-8-sig').replace('\r\n', '\n')
     if values:
         text = set_section(text, 'SystemSettings', values)
     if engine:
         text = set_section(text, '/Script/Engine.Engine', engine)
+    if physics:
+        text = set_section(text, '/Script/Engine.PhysicsSettings', physics)
     return text.replace('\n', '\r\n').encode('utf-8')
 
 
@@ -228,7 +236,15 @@ QUALITY = {
     },
     'low': {
         'r.ShadowQuality': '1', 'r.Shadow.MaxCSMResolution': '1024', 'r.Shadow.MaxResolution': '512',
-        'r.Shadow.CSM.MaxCascades': '2', 'r.VolumetricFog': '0', 'r.AmbientOcclusionLevels': '0',
+        # Linux fork: volumetric fog stays on, on a coarser grid. Off, the levels' height fog
+        # drew its full inscattering colour without shadows: objects near the floor glowed pink
+        # and whole areas washed out (MediEvil's Hilltop Mausoleum, Steam Deck mode), normal
+        # again higher up. Defaults are 8 px cells and 128 slices.
+        'r.Shadow.CSM.MaxCascades': '2', 'r.VolumetricFog.GridPixelSize': '16',
+        'r.VolumetricFog.GridSizeZ': '64', 'r.AmbientOcclusionLevels': '0',
+        # Linux fork: lights one by one instead of UE4's tiled compute pass: the Hilltop
+        # Mausoleum held 30 FPS on the Deck's APU (pyro) instead of 21-23.
+        'r.TiledDeferredShading': '0',
         'r.SSR.Quality': '0', 'r.MotionBlurQuality': '0', 'r.DepthOfFieldQuality': '0',
         'r.LensFlareQuality': '0', 'r.SceneColorFringeQuality': '0', 'r.BloomQuality': '2',
         'r.RefractionQuality': '0', 'r.ViewDistanceScale': '0.7', 'foliage.DensityScale': '0.6',
@@ -245,6 +261,9 @@ QUALITY = {
 # 60 FPS up to about 2000 draws a frame; busy outdoor scenes reached 4000 (30 FPS) before.
 LOCAL_SHADOWS = {'ultra': (1024, 0.06), 'high': (1024, 0.08), 'console': (512, 0.1),
                  'medium': (512, 0.12), 'low': (256, 0.15)}
+# Linux fork: 0.1 for low (more small lights shadowed) turned a whole MediEvil level (the Hilltop
+# Mausoleum) bright pink in Steam Deck mode: those lights' shadows come out inverted (also the
+# white patches at the foot of banners). Back to 0.15 until the inversion is found.
 # Sun/moon shadow cascades and distance per preset (each cascade redraws the scene once).
 SUN_SHADOWS = {'ultra': ('3', '1.5'), 'high': ('3', '1.2'), 'console': ('2', '0.8'),
                'medium': ('2', '0.75'), 'low': ('2', '0.6')}
@@ -266,11 +285,14 @@ def debug_menu_config(game, enabled):
 # The debug menu's widget Blueprint: when it is created it calls SetFrameRateLimit(60) and
 # ApplySettings ("Set FPS Max to 30" off), which capped the game at 60 FPS again; 0 is no limit.
 # Its "Cinematic Mode (1440p)" button (r.SetRes) becomes 4K and a profiling toggle 1440p. Same-length edits only (the Blueprint
-# bytecode and the package's export sizes stay valid); each must match exactly once.
+# bytecode and the package's export sizes stay valid); each must match exactly once. An edit given as a
+# list holds one variant per game version (object and name indices differ: US 01.00, then EU 01.02
+# CUSA12982); the variant whose bytes are found is used.
 DEBUG_HUD = 'OVERBITE/Content/Blueprints/Debug/DebugHUD.uexp'
 DEBUG_HUD_EDITS = [
     # SetFrameRateLimit(60.0): EX_FloatConst 60.0 after the call to that import.
-    (bytes.fromhex('1c1dffffff1e00007042'), bytes.fromhex('1c1dffffff1e00000000'), 1),
+    [(bytes.fromhex('1c1dffffff1e00007042'), bytes.fromhex('1c1dffffff1e00000000'), 1),
+     (bytes.fromhex('1c19ffffff1e00007042'), bytes.fromhex('1c19ffffff1e00000000'), 1)],
     # 4K needs the "Native 4K framebuffer pool" patch (patches/MediEvil.xml): the PS4 pool of
     # 128 MB ran out of memory.
     (b'r.SetRes 2560x1440\0', b'r.SetRes 3840x2160\0', 1),
@@ -283,9 +305,24 @@ DEBUG_HUD_EDITS = [
     # every enemy standing still, for the rest of the session (the flag is on the game instance).
     # Destruct runs however the menu closes: its gamma reset ("retain gamma" box) becomes
     # SetAIPaused(false, false, self), copied from CloseDebug, plus two EX_Nothing.
-    (bytes.fromhex('072d2b000000930000004d1920dafeffff13000000000000001c00ffffff171f67616d6d61002a16'),
-     bytes.fromhex('072d2b000000930000000b1920c6feffff11000000000000001b5004000000000000282817160b0b'), 1),
+    [(bytes.fromhex('072d2b000000930000004d1920dafeffff13000000000000001c00ffffff171f67616d6d61002a16'),
+      bytes.fromhex('072d2b000000930000000b1920c6feffff11000000000000001b5004000000000000282817160b0b'), 1),
+     (bytes.fromhex('07d82b000000990000004d1920d5feffff13000000000000001cfbfeffff171f67616d6d61002a16'),
+      bytes.fromhex('07d82b000000990000000b1920c0feffff11000000000000001b6704000000000000282817160b0b'), 1)],
 ]
+
+
+def apply_edits(name, data, edits):
+    """Same-length byte edits; a list entry is one variant per game version (the one found)."""
+    for edit in edits:
+        variants = edit if isinstance(edit, list) else [edit]
+        for old, new, count in variants:
+            if data.count(old) == count:
+                data = data.replace(old, new)
+                break
+        else:
+            raise ValueError(f'{name}: unexpected contents (game version?)')
+    return data
 
 
 # The debug menu's first resolution button follows the native output setting: the base PS4
@@ -299,11 +336,7 @@ NATIVE_BUTTON = {'720p_native': (b'r.SetRes 1280x720 ', b'Cinematic Mode (720p) 
 
 
 def debug_hud(game, resolution='native'):
-    data = read_file(game, DEBUG_HUD)
-    for old, new, count in DEBUG_HUD_EDITS:
-        if data.count(old) != count:
-            raise ValueError(f'{DEBUG_HUD}: unexpected contents (game version?)')
-        data = data.replace(old, new)
+    data = apply_edits(DEBUG_HUD, read_file(game, DEBUG_HUD), DEBUG_HUD_EDITS)
     if resolution in NATIVE_BUTTON:
         command, label = NATIVE_BUTTON[resolution]
         data = data.replace(b'r.SetRes 3840x2160\0', command + b'\0', 1)
@@ -327,18 +360,49 @@ def debug_hud(game, resolution='native'):
 # charge for what uses the same function.
 INFINITE_AMMO = 'OVERBITE/Content/Blueprints/GameInstance/OverbiteGameInstanceFunctions.uexp'
 INFINITE_AMMO_EDITS = [
-    (bytes.fromhex('6816ffffff1d00000000007d030000161b53'),
-     bytes.fromhex('6816ffffff1d00000000007c030000161b53'), 1),
+    [(bytes.fromhex('6816ffffff1d00000000007d030000161b53'),
+      bytes.fromhex('6816ffffff1d00000000007c030000161b53'), 1),
+     # EU 01.02: Subtract_IntInt is import -244, Health local 0x393, the result local 0x392.
+     (bytes.fromhex('680cffffff1d000000000093030000161b58'),
+      bytes.fromhex('680cffffff1d000000000092030000161b58'), 1)],
 ]
 
 
+# Voice language (medievil.ini ue4_voice): the game takes its spoken language from its text
+# language (GetWWiseLanguageFromLanguageID: LanguageIDToWWiseLanguageMap, else 'English(US)').
+# Both versions ship 15 voice languages. With a voice language chosen, that function skips the map
+# (its JumpIfNot becomes a Jump to the fallback, the condition left as a dead expression) and the
+# fallback becomes the chosen Wwise language, padded with EX_Nothing: the same size on disk and in
+# memory, so text and voices can differ (Japanese voices with English text, for example).
+GAME_INSTANCE = 'OVERBITE/Content/Blueprints/GameInstance/OverbiteGameInstance.uexp'
+VOICE_LANGUAGES = ('English(US)', 'French', 'German', 'Italian', 'Spanish', 'es-MX', 'Portuguese',
+                   'pt-BR', 'Dutch', 'Polish', 'Russian', 'Czech', 'Greek', 'Arabic', 'Japanese')
+VOICE_FUNCTION_END = b'\x1fEnglish(US)\x00\x04\x0b\x53'
+VOICE_FUNCTION_SIZE = 138  # disk bytes of GetWWiseLanguageFromLanguageID in 01.00 and 01.02
+
+
+def voice_language(game, voice):
+    if voice not in VOICE_LANGUAGES:
+        raise ValueError(f'unknown voice language {voice!r}')
+    data = read_file(game, GAME_INSTANCE)
+    if data.count(VOICE_FUNCTION_END) != 1:
+        raise ValueError(f'{GAME_INSTANCE}: unexpected contents (game version?)')
+    end = data.find(VOICE_FUNCTION_END) + len(VOICE_FUNCTION_END)
+    start = end - VOICE_FUNCTION_SIZE
+    script = bytearray(data[start:end])
+    # The map's miss branch: EX_JumpIfNot 0xb8 (EX_LocalVariable condition) after EndFunctionParms.
+    jump = script.find(b'\x16\x07\xb8\x00\x00\x00\x00')
+    if jump < 0 or script.count(b'\x16\x07\xb8\x00\x00\x00\x00') != 1:
+        raise ValueError(f'{GAME_INSTANCE}: unexpected contents (game version?)')
+    script[jump + 1] = 0x06  # EX_Jump: always the fallback
+    text = b'English(US)\x00'
+    at = script.find(b'\x1f' + text) + 1
+    script[at:at + len(text)] = voice.encode() + b'\x00' + b'\x0b' * (len(text) - len(voice) - 1)
+    return data[:start] + bytes(script) + data[end:]
+
+
 def edited_asset(game, name, edits):
-    data = read_file(game, name)
-    for old, new, count in edits:
-        if data.count(old) != count:
-            raise ValueError(f'{name}: unexpected contents (game version?)')
-        data = data.replace(old, new)
-    return data
+    return apply_edits(name, read_file(game, name), edits)
 
 
 # Anti-aliasing (medievil.ini ue4_aa, issue #27): the PS4 game uses temporal AA, soft in motion.
@@ -348,7 +412,7 @@ ANTI_ALIASING = {'taa': None, 'fxaa': '2', 'off': '0'}
 
 
 def apply(game, resolution='native', quality='console', fps=60, debug_menu=False, infinite_ammo=False,
-          upscale='off', aa='taa'):
+          upscale='off', aa='taa', prompts='playstation', cache_dir=None, voice=''):
     """Writes or removes the override pak. Returns a short description of the active state."""
     pak = paks_dir(game) / PAK_NAME
     # Earlier builds wrote the `_P` spelling: on Linux it stayed behind, unread.
@@ -372,11 +436,38 @@ def apply(game, resolution='native', quality='console', fps=60, debug_menu=False
     aa_quality = None if scale else ANTI_ALIASING.get(aa)
     if aa_quality is not None:
         values['r.PostProcessAAQuality'] = aa_quality
+    # Linux fork: GOW3_UE4_CVARS="name=value;name=value" adds or overrides console variables, last, so
+    # it also overrides the resolution and anti-aliasing values above
+    # (diagnostics through the launcher's extra-env.txt).
+    for item in os.environ.get('GOW3_UE4_CVARS', '').split(';'):
+        name, sep, value = item.strip().partition('=')
+        if sep and name:
+            values[name.strip()] = value.strip()
     engine = frame_rate_range(fps) if fps > 60 else {}
-    if not values and not engine and not debug_menu and not infinite_ammo:
+    # Linux fork: GOW3_FIXED_FRAME_RATE=30 (recording or replaying inputs for testing): the game
+    # advances exactly 1/30 s per frame, so a replay simulates the same as the recording did,
+    # whatever the machine's frame times.
+    fixed = os.environ.get('GOW3_FIXED_FRAME_RATE', '')
+    physics = {}
+    if fixed.isdigit() and int(fixed) > 0:
+        engine.update({'bUseFixedFrameRate': 'True', 'FixedFrameRate': f'{int(fixed)}.000000'})
+        # Linux fork: GOW3_PHYSICS_SUBSTEPS=1 (launcher extra-env.txt): below 60 the physics
+        # advances in 60 Hz substeps. Off by default: it did not stop the wisp that follows the
+        # hero from zigzagging, and is the first suspect for MediEvil's hologram dragons
+        # wandering off their path between the cornfields.
+        if int(fixed) < 60 and os.environ.get('GOW3_PHYSICS_SUBSTEPS', '0') == '1':
+            physics = {'bSubstepping': 'True', 'MaxSubstepDeltaTime': '0.016667', 'MaxSubsteps': '4'}
+    # Linux fork: Xbox or Steam Deck button pictures (button_prompts.py).
+    import button_prompts
+    try:
+        pictures = button_prompts.prompt_files(game, prompts, cache_dir)
+    except (OSError, ValueError, ImportError) as error:
+        print(f'Button pictures: PlayStation ({error})', flush=True)
+        pictures = {}
+    if not values and not engine and not physics and not debug_menu and not infinite_ammo and not pictures and not voice:
         pak.unlink(missing_ok=True)
         return 'native 1080p, console quality, 60 FPS'
-    files = {CONFIG: set_values(read_file(game, CONFIG), values, engine)}
+    files = {CONFIG: set_values(read_file(game, CONFIG), values, engine, physics)}
     # Native output: the base PS4 renderer makes its buffers at the display size at start and only
     # a live r.SetRes changes them; the runtime sets it (GOW3_UE4_SETRES), and the debug menu's
     # first resolution button follows the setting.
@@ -394,14 +485,21 @@ def apply(game, resolution='native', quality='console', fps=60, debug_menu=False
         except (ValueError, FileNotFoundError) as error:
             print(f'Unlimited ammo: not available for this game build ({error})', flush=True)
             infinite_ammo = False
+    files.update(pictures)
+    if voice:
+        try:
+            files[GAME_INSTANCE] = voice_language(game, voice)
+        except (ValueError, FileNotFoundError) as error:
+            print(f'Voice language: not available for this game build ({error})', flush=True)
+            voice = ''
     write_pak(pak, files)
-    return (f'{resolution if percentage or output else "native 1080p"}'
+    return (f'{"" if not pictures else prompts + " button pictures, "}'f'{resolution if percentage or output else "native 1080p"}'
             f'{f" (r.ScreenPercentage={percentage})" if percentage else ""}'
             f'{f" (native output {output})" if output else ""}'
             f'{f", temporal upscaling {upscale} ({scale}%)" if scale else ""}'
             f'{f", anti-aliasing {aa}" if aa_quality is not None else ""}, {quality} quality, '
             f'{f"up to {fps}" if fps > 60 else 60} FPS{", debug menu (R3)" if debug_menu else ""}'
-            f'{", unlimited ammo" if infinite_ammo else ""}')
+            f'{", unlimited ammo" if infinite_ammo else ""}{f", voices {voice}" if voice else ""}')
 
 
 if __name__ == '__main__':
