@@ -95,8 +95,34 @@ void Liverpool::ProcessCommands() {
         Common::UniqueFunction<void> callback{};
         {
             std::scoped_lock lk{submit_mutex};
-            callback = std::move(command_queue.front());
-            command_queue.pop();
+            if (!waiting_queue.empty()) {
+                callback = std::move(waiting_queue.front());
+                waiting_queue.pop();
+                --num_waiting;
+            } else {
+                callback = std::move(command_queue.front());
+                command_queue.pop();
+            }
+            --num_commands;
+        }
+        callback();
+    }
+}
+
+void Liverpool::ProcessWaitingCommands() {
+    if (!num_waiting) {
+        return;
+    }
+    if (rasterizer) {
+        rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCommands); // they touch the caches
+    }
+    while (num_waiting) {
+        Common::UniqueFunction<void> callback{};
+        {
+            std::scoped_lock lk{submit_mutex};
+            callback = std::move(waiting_queue.front());
+            waiting_queue.pop();
+            --num_waiting;
             --num_commands;
         }
         callback();

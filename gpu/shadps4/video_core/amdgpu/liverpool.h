@@ -133,13 +133,17 @@ public:
     template <bool wait_done = false>
     void SendCommand(auto&& func) {
         if constexpr (wait_done) {
+            // Linux fork: a caller that waits (a guest thread's write fault or read back) goes
+            // into its own queue, which the GPU command thread also serves while it waits for
+            // the GPU (ProcessWaitingCommands), and before the other commands (flips).
             std::binary_semaphore sem{0};
             {
                 std::scoped_lock lk{submit_mutex};
-                command_queue.emplace([&sem, &func] {
+                waiting_queue.emplace([&sem, &func] {
                     func();
                     sem.release();
                 });
+                ++num_waiting;
                 ++num_commands;
                 submit_cv.notify_one();
             }
@@ -226,6 +230,11 @@ private:
     Task ProcessCompute(std::span<const u32> acb, u32 vqid);
 
     void ProcessCommands();
+
+    /// Linux fork: runs only the commands whose sender waits for them (guest threads' write
+    /// faults and read backs). For the GPU command thread while it waits for the GPU, so those
+    /// threads are not held up for the whole wait.
+    void ProcessWaitingCommands();
     void Process(std::stop_token stoken);
 
     struct GpuQueue {
@@ -276,6 +285,8 @@ private:
     std::mutex submit_mutex;
     std::condition_variable_any submit_cv;
     std::queue<Common::UniqueFunction<void>> command_queue{};
+    std::atomic<u32> num_waiting{};
+    std::queue<Common::UniqueFunction<void>> waiting_queue{};
     std::thread::id gpu_id;
 #if defined(__linux__) || defined(_WIN32)
     u32 gpu_tid{};
