@@ -2475,26 +2475,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                         vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite,
                         desc.view_info.range);
                 } else {
-                    // Linux fork: depth sampled while it is the read-only depth / writable stencil
-                    // attachment (UE4's shadow projections) stays in that layout, which allows
-                    // depth reads: switching back and forth cost ~26,000 barriers and render pass
-                    // breaks per 5 s in MediEvil's Pumpkin Gorge. Stencil views (S8/R8) switch.
-                    // GOW3_DEPTH_SAMPLE_SWITCH=1: always switch, as before.
-                    static const bool always_switch = [] {
-                        const char* env = std::getenv("GOW3_DEPTH_SAMPLE_SWITCH");
-                        return env && env[0] == '1';
-                    }();
-                    const bool keep_stencil_attachment =
-                        !always_switch && image.info.props.is_depth &&
-                        image.backing->state.layout ==
-                            vk::ImageLayout::eDepthReadOnlyStencilAttachmentOptimal &&
-                        image.backing->subresource_states.empty() &&
-                        desc.view_info.format != vk::Format::eS8Uint &&
-                        desc.view_info.format != vk::Format::eR8Uint;
-                    const auto new_layout =
-                        keep_stencil_attachment ? vk::ImageLayout::eDepthReadOnlyStencilAttachmentOptimal
-                        : image.info.props.is_depth ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
-                                                    : vk::ImageLayout::eShaderReadOnlyOptimal;
+                    const auto new_layout = image.info.props.is_depth
+                                                ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
+                                                : vk::ImageLayout::eShaderReadOnlyOptimal;
                     barrier |= runtime.Transit(
                         &image, new_layout, vk::PipelineStageFlagBits2::eAllCommands,
                         vk::AccessFlagBits2::eShaderRead, desc.view_info.range);
