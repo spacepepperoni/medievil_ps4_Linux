@@ -2907,7 +2907,18 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         const bool stencil_write = has_stencil &&
                                    (regs.depth_control.stencil_enable || is_stencil_clear) &&
                                    !desc.view_info.is_storage;
-        const auto new_layout = desc.view_info.is_storage
+        // Linux fork: unless the draw also samples the depth image, it stays in the writable
+        // layout: whether depth or stencil is written is dynamic state, and switching among the
+        // three layouts per draw cost a barrier and a render pass break each time (~240 a frame
+        // in MediEvil's Pumpkin Gorge; every break stores and reloads D32S8, slow on RADV).
+        // GOW3_DEPTH_LAYOUT_PER_DRAW=1: the per-draw layouts as before.
+        static const bool per_draw_layout = [] {
+            const char* env = std::getenv("GOW3_DEPTH_LAYOUT_PER_DRAW");
+            return env && env[0] == '1';
+        }();
+        const bool writable_layout =
+            desc.view_info.is_storage || (!per_draw_layout && !image.binding.is_bound);
+        const auto new_layout = writable_layout
                                     ? has_stencil ? vk::ImageLayout::eDepthStencilAttachmentOptimal
                                                   : vk::ImageLayout::eDepthAttachmentOptimal
                                 : stencil_write
