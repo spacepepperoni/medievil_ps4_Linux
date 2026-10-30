@@ -130,6 +130,11 @@ public:
         rasterizer = rasterizer_;
     }
 
+    /// Linux fork: runs only the commands whose sender waits for them (guest threads' write
+    /// faults and read backs). For the GPU command thread while it waits for the GPU, so those
+    /// threads are not held up for the whole wait.
+    void ProcessWaitingCommands();
+
     template <bool wait_done = false>
     void SendCommand(auto&& func) {
         if constexpr (wait_done) {
@@ -230,11 +235,6 @@ private:
     Task ProcessCompute(std::span<const u32> acb, u32 vqid);
 
     void ProcessCommands();
-
-    /// Linux fork: runs only the commands whose sender waits for them (guest threads' write
-    /// faults and read backs). For the GPU command thread while it waits for the GPU, so those
-    /// threads are not held up for the whole wait.
-    void ProcessWaitingCommands();
     void Process(std::stop_token stoken);
 
     struct GpuQueue {
