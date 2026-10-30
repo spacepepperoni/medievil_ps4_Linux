@@ -51,9 +51,14 @@ PLATFORM = 'PC' if WINDOWS else 'Linux/Steam Deck'  # Linux fork: the window tit
 MAX_LOG_LINES = 6000
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 # This build. The launcher checks the GitHub releases at start and offers newer versions.
-VERSION = '1.3.7'
+VERSION = '1.3.8'
 RELEASES_API = 'https://api.github.com/repos/bc160201983/medievil_2019_pc_port/releases/latest'
 RELEASES_PAGE = 'https://github.com/bc160201983/medievil_2019_pc_port/releases'
+# The port's pages (Home and Advanced), opened in the browser.
+LINKS = (('GitHub', 'https://github.com/bc160201983/medievil_2019_pc_port'),
+         ('YouTube', 'https://www.youtube.com/@BilalReloaded'),
+         ('Patreon', 'https://www.patreon.com/c/bilalreloaded'))
+WINDOW_TITLE = '{} (PC) — Port By BilalReloaded · v{}'
 UPDATE_DIR = Path(tempfile.gettempdir()) / 'medievil-update'
 if not WINDOWS:  # Linux fork: releases, version and updates come from the fork
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -164,7 +169,7 @@ INI_DEFAULTS = {'upscaler': 'off', 'preset': '1', 'sharpen': '1', 'sharpness': '
                 'live_resolution': 'auto', 'display_mode': 'windowed', 'vsync': '1', 'fps_limit': '0',
                 'async_shaders': '1', 'deferred_readback': '1', 'stale_readback': '0',
                 'render_resolution': 'native', 'engine_fps': '60', 'fps_default_60': '1', 'fsr1': '0', 'rcas': '1',
-                'rcas_strength': '75', 'frames_queued': '1', 'ue4_quality': 'console', 'cheat_very_hard': '0', 'cheat_double_jumps': '0', 'cheat_menu': '0', 'cheat_infinite_ammo': '0', 'ue4_upscale': 'off', 'ue4_aa': 'taa'}
+                'rcas_strength': '75', 'frames_queued': '1', 'ue4_quality': 'console', 'cheat_very_hard': '0', 'cheat_double_jumps': '0', 'cheat_menu': '0', 'cheat_infinite_ammo': '0', 'ue4_upscale': 'off', 'ue4_aa': 'taa', 'ue4_voice': ''}
 DISPLAY_MODES = [('windowed', ('Windowed',)), ('borderless', ('Borderless',)), ('fullscreen', ('Fullscreen',))]
 FPS_LIMITS = [('30', ('30',)), ('60', ('60',)), ('120', ('120',)), ('240', ('240',)), ('0', ('Unlimited',)),
               ('-1', ('Half display refresh (smoothest)',))]
@@ -245,6 +250,13 @@ LANGUAGES = [('1', ('English', 'Английский')), ('18', ('English (UK)',
              ('17', ('Portuguese (Brazil)',)), ('12', ('Finnish',)), ('13', ('Swedish',)), ('14', ('Danish',)),
              ('15', ('Norwegian',)), ('19', ('Turkish',)), ('21', ('Arabic',)), ('23', ('Czech',)),
              ('24', ('Hungarian',)), ('25', ('Greek',)), ('26', ('Romanian',))]
+# Spoken language (medievil.ini ue4_voice): '' follows the game language (the game's own map).
+VOICE_LANGUAGES = [('', ('Same as game language',)), ('English(US)', ('English',)), ('French', ('French',)),
+                   ('German', ('German',)), ('Italian', ('Italian',)), ('Spanish', ('Spanish',)),
+                   ('es-MX', ('Spanish (Latin America)',)), ('Portuguese', ('Portuguese',)),
+                   ('pt-BR', ('Portuguese (Brazil)',)), ('Dutch', ('Dutch',)), ('Polish', ('Polish',)),
+                   ('Russian', ('Russian',)), ('Czech', ('Czech',)), ('Greek', ('Greek',)), ('Arabic', ('Arabic',)),
+                   ('Japanese', ('Japanese',))]
 DRAW_PIPE = [('', ('Auto (8+ threads)', 'Авто (8+ потоков)')), ('1', ('On', 'Включён')),
              ('0', ('Off (more stable)', 'Выключен (стабильнее)'))]
 # "Precise" (GOW3_READBACKS=2) left MediEvil on a black screen (issue #15): not offered, and a
@@ -520,7 +532,7 @@ class Launcher:
         self.banner_source = self.banner_image = None
         self.ui_calls = queue.Queue()  # work for the Tk thread from helper threads
         self.mod_order, self.mod_vars, self.patch_vars = [], {}, {}
-        root.title(f'{APP_NAME} ({PLATFORM})')
+        root.title(WINDOW_TITLE.replace('(PC)', f'({PLATFORM})').format(APP_NAME, VERSION))
         if sys.platform == 'win32':
             try:  # the taskbar shows this window's icon, not Python's
                 import ctypes
@@ -957,6 +969,18 @@ class Launcher:
         flags.grid(row=4, column=0, columnspan=4, sticky='w', pady=(6, 0))
         for key, title in (('vsync', _('VSync')), ('show_fps', _('Show performance overlay'))):
             ttk.Checkbutton(flags, text=title, variable=self.var(key, 'ini')).pack(side='left', padx=(0, 28))
+        self.link_buttons(quick).grid(row=5, column=0, columnspan=4, sticky='w', pady=(14, 0))
+
+    def link_buttons(self, parent):
+        """GitHub, YouTube and Patreon buttons that open the port's pages in the browser."""
+        ttk = self.ttk
+        holder = ttk.Frame(parent)
+        for index, (name, url) in enumerate(LINKS):
+            ttk.Button(holder, text=name, command=lambda u=url: webbrowser.open(u)).pack(
+                side='left', padx=(0 if index == 0 else 8, 0))
+        ttk.Label(holder, text=_('Support the port on Patreon', 'Поддержите порт на Patreon'),
+                  style='Muted.TLabel').pack(side='left', padx=12)
+        return holder
 
     def draw_banner(self):
         """The cover art of the selected dump (sce_sys/pic1.png) under the title."""
@@ -1174,6 +1198,9 @@ class Launcher:
         self.build_save_backups(f)
         self.section(f, _('Language'))
         self.row(f, _('Game language', 'Язык игры'), self.choice(f, 'language', 'app', LANGUAGES))
+        self.row(f, _('Voice language'), self.choice(f, 'ue4_voice', 'ini', VOICE_LANGUAGES),
+                 _('The spoken language: 15 are in the game. "Same as game language" follows the game '
+                   'language (English voices for languages without a dub). Applied at start.'), restart=True)
         self.section(f, _('Cheats'))
         self.check(f, 'cheat_menu', 'ini', _('Developer cheat menu (R3 in the game)'),
                    _("MediEvil's own debug menu, left in the game by its developers: level select, complete "
@@ -1483,6 +1510,8 @@ class Launcher:
                        _('Records every button and stick of each session, frame by frame, into pad-recordings in '
                          'the saves folder, and runs the game on a fixed 30 FPS clock meanwhile (it slows down '
                          'briefly where the Deck cannot keep up), so the recording can be replayed exactly.'))
+        self.section(f, _('Links', 'Ссылки'))
+        self.link_buttons(f).grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(6, 0))
         self.section(f, _('Files'))
         holder = ttk.Frame(f)
         holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(6, 0))
@@ -1546,7 +1575,7 @@ class Launcher:
         folder = self.var('game_dir', 'app').get()
         info = game_info(folder)
         title = info[0] if info else APP_NAME
-        self.root.title(f'{title} ({PLATFORM})')
+        self.root.title(WINDOW_TITLE.replace('(PC)', f'({PLATFORM})').format(title, VERSION))
         self.side_title.configure(text=title.upper())
         if self.current_page == 'patches':
             self.refresh_game_patches()

@@ -180,7 +180,7 @@ def main():
                                                            ini.get('ue4_upscale', 'off'),
                                                            ini.get('ue4_aa', 'taa'),
                                                            env.get('GOW3_BUTTON_PROMPTS', 'playstation'),
-                                                           out), flush=True)
+                                                           out, ini.get('ue4_voice', '')), flush=True)
         except (OSError, ValueError) as error:
             print(f'Render resolution: unchanged ({error})', flush=True)
     original_game = game.resolve()

@@ -275,7 +275,8 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR,
         vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE,
         vk::PhysicalDevicePipelineBinaryFeaturesKHR,
-        vk::PhysicalDeviceMaintenance5FeaturesKHR>();
+        vk::PhysicalDeviceMaintenance5FeaturesKHR, vk::PhysicalDeviceMemoryPriorityFeaturesEXT,
+        vk::PhysicalDevicePageableDeviceLocalMemoryFeaturesEXT>();
     features = feature_chain.get().features;
 
     const vk::StructureChain properties_chain = physical_device.getProperties2<
@@ -356,6 +357,26 @@ bool Instance::CreateDevice() {
                  dynamic_state_3_features.extendedDynamicState3ColorWriteMask);
     }
     custom_border_color = add_extension(VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
+    // From the Uncharted port (20 Oct 2026, its #81): without this, NVIDIA refuses device-local
+    // memory once the card's own memory is used up (ErrorOutOfDeviceMemory: MediEvil #58 after a
+    // while in a level). With it the driver moves memory to system RAM instead: slower while the
+    // card is full, but the game goes on. GOW3_PAGEABLE_MEMORY=0: off.
+    {
+        const char* env = std::getenv("GOW3_PAGEABLE_MEMORY");
+        const bool wanted = !(env && env[0] == '0');
+        if (wanted &&
+            feature_chain.get<vk::PhysicalDeviceMemoryPriorityFeaturesEXT>().memoryPriority &&
+            feature_chain.get<vk::PhysicalDevicePageableDeviceLocalMemoryFeaturesEXT>()
+                .pageableDeviceLocalMemory) {
+            memory_priority = add_extension(VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME);
+            pageable_device_memory =
+                memory_priority && add_extension(VK_EXT_PAGEABLE_DEVICE_LOCAL_MEMORY_EXTENSION_NAME);
+        }
+        std::printf("GPU: pageable video memory %s\n",
+                    pageable_device_memory
+                        ? "on (when the card is full, the driver moves memory to system RAM)"
+                        : wanted ? "not supported by this driver" : "off (GOW3_PAGEABLE_MEMORY=0)");
+    }
     depth_clip_control = add_extension(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
     depth_clip_enable = add_extension(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME);
     vertex_input_dynamic_state = add_extension(VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
@@ -622,6 +643,12 @@ bool Instance::CreateDevice() {
             .image2DViewOf3D = image_2d_view_of_3d_features.image2DViewOf3D,
             .sampler2DViewOf3D = image_2d_view_of_3d_features.sampler2DViewOf3D,
         },
+        vk::PhysicalDeviceMemoryPriorityFeaturesEXT{
+            .memoryPriority = true,
+        },
+        vk::PhysicalDevicePageableDeviceLocalMemoryFeaturesEXT{
+            .pageableDeviceLocalMemory = true,
+        },
         vk::PhysicalDeviceImageViewMinLodFeaturesEXT{
             .minLod = true,
         },
@@ -687,6 +714,12 @@ bool Instance::CreateDevice() {
     }
     if (!image_2d_view_of_3d) {
         device_chain.unlink<vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT>();
+    }
+    if (!memory_priority) {
+        device_chain.unlink<vk::PhysicalDeviceMemoryPriorityFeaturesEXT>();
+    }
+    if (!pageable_device_memory) {
+        device_chain.unlink<vk::PhysicalDevicePageableDeviceLocalMemoryFeaturesEXT>();
     }
     if (!image_view_min_lod) {
         device_chain.unlink<vk::PhysicalDeviceImageViewMinLodFeaturesEXT>();

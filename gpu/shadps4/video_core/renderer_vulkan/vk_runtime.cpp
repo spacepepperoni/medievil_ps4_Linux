@@ -928,19 +928,35 @@ void Runtime::FlushBarriers() {
         return;
     }
 
+    // gow3: the largest batches in the log (AMD's older driver crashed at 3696 image barriers).
+    static size_t largest_batch = 64;
+    if (image_barriers.size() > largest_batch) {
+        largest_batch = image_barriers.size();
+        std::printf("Barriers: %zu image barriers in one batch (largest so far)\n", largest_batch);
+        std::fflush(stdout);
+    }
     scheduler.EndRendering();
     scheduler.Record([memory = memory_barrier, has_memory = dep_info.memoryBarrierCount != 0,
                       images = scheduler.RecordData(std::span<const vk::ImageMemoryBarrier2>(
                           image_barriers.data(), image_barriers.size()))](vk::CommandBuffer cmdbuf) {
-        const vk::DependencyInfo info = {
-            .memoryBarrierCount = has_memory ? 1U : 0U,
-            .pMemoryBarriers = has_memory ? &memory : nullptr,
-            .imageMemoryBarrierCount = static_cast<u32>(images.size()),
-            .pImageMemoryBarriers = images.data(),
-        };
-        recording_barriers = &info;
-        cmdbuf.pipelineBarrier2(info);
-        recording_barriers = nullptr;
+        // gow3: at most 128 image barriers per call: AMD's older Windows driver (RX 400/500, Vega)
+        // crashed recording thousands in one (issues #18, #34, #41, #43).
+        constexpr size_t MaxImageBarriers = 128;
+        size_t done = 0;
+        do {
+            const size_t count = std::min(images.size() - done, MaxImageBarriers);
+            const bool with_memory = has_memory && done == 0;
+            const vk::DependencyInfo info = {
+                .memoryBarrierCount = with_memory ? 1U : 0U,
+                .pMemoryBarriers = with_memory ? &memory : nullptr,
+                .imageMemoryBarrierCount = static_cast<u32>(count),
+                .pImageMemoryBarriers = images.data() + done,
+            };
+            recording_barriers = &info;
+            cmdbuf.pipelineBarrier2(info);
+            recording_barriers = nullptr;
+            done += count;
+        } while (done < images.size());
     });
 
     memory_barrier.srcStageMask = vk::PipelineStageFlagBits2::eNone;

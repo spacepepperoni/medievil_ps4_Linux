@@ -108,6 +108,35 @@ int compat_random(void *buffer, size_t size) {
     return 0;
 }
 
+/* From the Uncharted port (28-29 Oct 2026): the process never asked for a timer resolution, so
+ * every timed wait outside compat_sleep_ns (condition variables with a timeout, sleep_for,
+ * WaitForSingleObject(ms), the guest's timed waits) rounded up to Windows' 15.6 ms tick, and a
+ * frame could lose one or two ticks (16 or 31 ms). Uncharted measured +9..+22% FPS with 1 ms.
+ *   GOW3_TIMER_RES=0 keeps 15.6 ms. GOW3_POWER_THROTTLE=1 keeps Windows' power throttling
+ *   (opting out keeps full speed on hybrid CPUs and laptops, and the 1 ms tick while hidden). */
+#include <mmsystem.h>
+static int env_switch(const char *name, int fallback) {
+    const char *v = getenv(name);
+    return v && *v ? strcmp(v, "0") != 0 : fallback;
+}
+void runtime_host_scheduling_init(void) {
+    if (env_switch("GOW3_TIMER_RES", 1)) {
+        MMRESULT r = timeBeginPeriod(1);
+        printf("Host scheduling: 1 ms timer resolution%s (GOW3_TIMER_RES=0 keeps 15.6 ms)\n",
+               r == TIMERR_NOERROR ? "" : " REFUSED");
+    }
+    if (!env_switch("GOW3_POWER_THROTTLE", 0)) {
+        PROCESS_POWER_THROTTLING_STATE state = {0};
+        state.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+        state.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED |
+                            PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+        state.StateMask = 0; /* both controlled, both off: full speed, timer request honoured */
+        BOOL ok = SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &state, sizeof state);
+        printf("Host scheduling: power throttling off%s (GOW3_POWER_THROTTLE=1 keeps it)\n",
+               ok ? "" : " - REFUSED");
+    }
+}
+
 /* One high-resolution timer per thread (Windows 10 1803+); a plain waitable timer before. */
 static __thread HANDLE sleep_timer;
 void compat_sleep_ns(uint64_t ns) {

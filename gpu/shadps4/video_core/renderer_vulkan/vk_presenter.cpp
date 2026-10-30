@@ -161,6 +161,9 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
                               EmulatorSettings.IsPipelineCacheEnabled();
     const bool capture_only = EmulatorSettingsImpl::Flag("GOW3_PIPELINE_BINARY_ISOLATED", false) &&
                               EmulatorSettingsImpl::Flag("GOW3_PIPELINE_CAPTURE_ONLY", false);
+    // MediEvil keeps the on-demand start: the background warm-up of the Uncharted port (pipelines
+    // built from the cache during the title screen) drew levels black with red outlines here
+    // (the Graveyard, 29 Oct 2026; validation: descriptor layouts missing bindings).
     if (UseOnDemandPipelines(binary_cache, instance.GetPipelineBinaryGlobalKey().keySize != 0,
                             capture_only)) {
         rasterizer->GetPipelineCache().StartOnDemand();

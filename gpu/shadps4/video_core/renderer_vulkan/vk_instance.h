@@ -577,6 +577,8 @@ private:
     bool maintenance_8{};
     bool attachment_feedback_loop{};
     bool image_2d_view_of_3d{};
+    bool memory_priority{};        ///< gow3: VK_EXT_memory_priority (for pageable memory)
+    bool pageable_device_memory{}; ///< gow3: VK_EXT_pageable_device_local_memory
     bool image_view_min_lod{};
     bool shader_clock{};
     bool compute_shader_derivatives{};
