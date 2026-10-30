@@ -553,7 +553,9 @@ class Launcher:
         self.show('home')
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.after(100, self.drain_output)
-        if self.app.get('update_check', True):
+        if not WINDOWS:  # Linux fork: at launch and every 30 minutes
+            root.after(1500, lambda: medievil_linux.periodic_update_check(self))
+        elif self.app.get('update_check', True):
             root.after(1500, lambda: threading.Thread(target=self.check_update, daemon=True).start())
 
     def px(self, size):
@@ -864,6 +866,9 @@ class Launcher:
                                                'В игре: Insert или R3+L2\nоткрывает меню порта.'),
                                   bg=BG, fg=MUTED, font=self.f('body', 9), justify='left', wraplength=self.px(210))
         self.side_note.pack(anchor='w', padx=22, pady=(0, 18))
+        if not WINDOWS:  # Linux fork: GitHub, update button and version at the bottom
+            self.side_note.pack_configure(pady=(0, 12))
+            self.corner = medievil_linux.Corner(self, side, BG, TEXT, MUTED, GOLD, VERSION, _)
 
         right = tk.Frame(self.root, bg=PANEL)
         right.pack(side='left', fill='both', expand=True)
@@ -1935,6 +1940,11 @@ class Launcher:
         self.ui_calls.put(show)
 
     def offer_update(self, version, url, page):
+        if not WINDOWS:  # Linux fork: the download button in the sidebar corner glows
+            self.corner.offer(version, url, page)
+            if not self.process:
+                self.status.configure(text=_('Version {} is available.', 'Доступна версия {}.').format(version), fg=TEXT)
+            return
         if self.update_box:
             return
         tk, ttk = self.tk, self.ttk

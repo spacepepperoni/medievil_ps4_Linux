@@ -473,3 +473,145 @@ def fork_line(launcher, side, bg, gold, text):
         pass
     tk.Label(row, text='Linux fork by spacepepperoni', bg=bg, fg=text, font=launcher.f('body', 9), bd=0).pack(
         side='left')
+
+
+# ---- Sidebar corner: GitHub, updates, version (as in the Uncharted Linux fork) ------------------
+REPO_URL = f'https://github.com/{REPO}'
+
+
+def download_icon(size, color, background, glow=0.0, glow_color=None):
+    """A download symbol (an arrow into a tray) as a PIL image; `glow` 0..1 adds a soft halo."""
+    from PIL import Image, ImageDraw, ImageFilter
+
+    def rgb(value):
+        return tuple(int(value[i:i + 2], 16) for i in (1, 3, 5))
+    n = size * 4
+    image = Image.new('RGB', (n, n), rgb(background))
+    if glow > 0:
+        halo = Image.new('L', (n, n), 0)
+        ImageDraw.Draw(halo).ellipse((n * 0.22, n * 0.22, n * 0.78, n * 0.78), fill=int(170 * glow))
+        halo = halo.filter(ImageFilter.GaussianBlur(n * 0.09))
+        image.paste(Image.new('RGB', (n, n), rgb(glow_color or color)), (0, 0), halo)
+    draw = ImageDraw.Draw(image)
+    w = max(2, int(n * 0.11))
+    c = rgb(color)
+    draw.line((n * 0.5, n * 0.12, n * 0.5, n * 0.62), fill=c, width=w)            # shaft
+    draw.polygon([(n * 0.27, n * 0.44), (n * 0.73, n * 0.44), (n * 0.5, n * 0.7)], fill=c)  # head
+    draw.line((n * 0.14, n * 0.66, n * 0.14, n * 0.86), fill=c, width=w)          # tray
+    draw.line((n * 0.14, n * 0.86, n * 0.86, n * 0.86), fill=c, width=w)
+    draw.line((n * 0.86, n * 0.86, n * 0.86, n * 0.66), fill=c, width=w)
+    return image.resize((size, size), Image.LANCZOS)
+
+
+class Corner:
+    """Bottom of the sidebar: the GitHub mark, the download button (grey: up to date; glowing and
+    pulsing: a new version, click to install it) and the version."""
+
+    def __init__(self, launcher, side, bg, text, muted, gold, version, _):
+        import webbrowser
+        tk = launcher.tk
+        self.launcher, self.muted, self.gold, self.version, self._ = launcher, muted, gold, version, _
+        self.state, self.new_version, self.url, self.page = 'none', None, None, RELEASES_PAGE
+        self.glowing, self.frame = False, 0
+        size = launcher.px(26)
+        row = tk.Frame(side, bg=bg)
+        row.pack(anchor='w', fill='x', padx=18, pady=(0, 18))
+        photo = launcher.photo
+        github_idle, github_hot = (photo(icon_image('github', size, c, bg)) for c in (muted, text))
+        github = tk.Label(row, bg=bg, bd=0, image=github_idle, cursor='hand2')
+        github.pack(side='left')
+        github.bind('<Button-1>', lambda _e: webbrowser.open(REPO_URL))
+        github.bind('<Enter>', lambda _e: github.configure(image=github_hot))
+        github.bind('<Leave>', lambda _e: github.configure(image=github_idle))
+        self.idle, self.hot = (photo(download_icon(size, c, bg)) for c in (muted, text))
+        self.glow_images = [photo(download_icon(size, '#ffd877', bg, glow=g, glow_color=gold))
+                            for g in (0.2, 0.4, 0.6, 0.8, 1.0, 0.8, 0.6, 0.4)]
+        self.button = tk.Label(row, bg=bg, bd=0, image=self.idle, cursor='hand2')
+        self.button.pack(side='left', padx=(launcher.px(12), 0))
+        self.button.bind('<Button-1>', lambda _e: self.clicked())
+        self.button.bind('<Enter>', lambda _e: self.state == 'none' and self.button.configure(image=self.hot))
+        self.button.bind('<Leave>', lambda _e: self.state == 'none' and self.button.configure(image=self.idle))
+        self.label = tk.Label(row, text=version, bg=bg, fg=muted, font=launcher.f('body', 9), bd=0)
+        self.label.pack(side='left', padx=(launcher.px(8), 0))
+
+    def show(self, text=None, fg=None):
+        self.label.configure(text=text or self.version, fg=fg or self.muted)
+
+    def set_state(self, state):
+        self.state = state
+        if state in ('available', 'downloading'):
+            if not self.glowing:
+                self.glowing = True
+                self.glow()
+        else:
+            self.glowing = False
+            self.button.configure(image=self.idle)
+
+    def glow(self):
+        if not self.glowing:
+            return
+        self.frame = (self.frame + 1) % len(self.glow_images)
+        self.button.configure(image=self.glow_images[self.frame])
+        self.launcher.root.after(110, self.glow)
+
+    def offer(self, version, url, page):
+        """A newer release (at launch or while open): the download button glows."""
+        if self.state == 'downloading':
+            return
+        self.new_version, self.url, self.page = version, url, page or RELEASES_PAGE
+        self.set_state('available')
+        self.show(self._('{} available').format(version), self.gold)
+
+    def clicked(self):
+        launcher = self.launcher
+        if self.state == 'available':
+            self.install()
+        elif self.state == 'none':
+            self.show(self._('Checking…'))
+
+            def check():
+                launcher.check_update(manual=True)
+                launcher.ui_calls.put(lambda: self.state == 'none' and self.show())
+            threading.Thread(target=check, daemon=True).start()
+
+    def install(self):
+        """Downloads the new AppImage, puts it in its place and opens it (other installs: the
+        release page)."""
+        import webbrowser
+        launcher, _ = self.launcher, self._
+        if launcher.process:
+            launcher.messagebox.showinfo(STEAM_NAME, _('Close the game before updating.'))
+            return
+        target = appimage()
+        if not target or not self.url:
+            webbrowser.open(self.page)
+            return
+        version = self.new_version
+        self.set_state('downloading')
+
+        def progress(percent):
+            launcher.ui_calls.put(lambda: self.show(_('Downloading {}%').format(percent), self.gold))
+
+        def restart():
+            subprocess.Popen([str(target)], env=clean_env(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+            launcher.root.destroy()
+
+        def work():
+            try:
+                install_appimage(self.url, target, progress)
+                launcher.ui_calls.put(restart)
+            except (OSError, ValueError) as failure:
+                def failed(error=failure):
+                    self.set_state('available')
+                    self.show(_('{} available').format(version), self.gold)
+                    launcher.messagebox.showerror(STEAM_NAME, _('Update failed: {}').format(error))
+                launcher.ui_calls.put(failed)
+        threading.Thread(target=work, daemon=True).start()
+
+
+def periodic_update_check(launcher):
+    """At launch and every 30 minutes while the launcher is open."""
+    if launcher.app.get('update_check', True) and launcher.corner.state == 'none':
+        threading.Thread(target=launcher.check_update, daemon=True).start()
+    launcher.root.after(30 * 60 * 1000, lambda: periodic_update_check(launcher))
