@@ -138,6 +138,36 @@ void Scheduler::EndRendering() {
     if (!is_rendering) {
         return;
     }
+    // Linux fork: GOW3_PASS_BREAKS=1 prints every 5 s who ends an active render pass (each break
+    // stores and reloads the attachments, costly for D32S8 depth on RADV).
+    static const bool pass_breaks = [] {
+        const char* env = std::getenv("GOW3_PASS_BREAKS");
+        return env && env[0] == '1';
+    }();
+    if (pass_breaks) {
+        static std::unordered_map<void*, u64> callers;
+        static auto next = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        ++callers[__builtin_return_address(0)];
+        if (std::chrono::steady_clock::now() >= next) {
+            std::vector<std::pair<u64, void*>> top;
+            for (const auto& [caller, count] : callers) top.emplace_back(count, caller);
+            std::ranges::sort(top, std::greater{});
+            std::string line;
+            for (size_t i = 0; i < std::min<size_t>(8, top.size()); ++i) {
+                uintptr_t offset = reinterpret_cast<uintptr_t>(top[i].second);
+#ifndef _WIN32
+                Dl_info info{};
+                if (dladdr(top[i].second, &info) && info.dli_fbase) {
+                    offset -= reinterpret_cast<uintptr_t>(info.dli_fbase);
+                }
+#endif
+                line += fmt::format(" {}x+{:#x}", top[i].first, offset);
+            }
+            std::printf("Pass breaks (5 s, caller offsets in libgow3gpu):%s\n", line.c_str());
+            callers.clear();
+            next = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        }
+    }
     is_rendering = false;
     Record([](vk::CommandBuffer cmdbuf) { cmdbuf.endRendering(); });
 }
