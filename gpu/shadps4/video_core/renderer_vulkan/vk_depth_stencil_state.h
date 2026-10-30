@@ -66,8 +66,13 @@ struct EffectiveDepthStencilState {
     const bool stencil_maintenance =
         stencil_valid && render_override.force_stencil_valid && render_override.force_stencil_dirty;
 
+    // Linux fork: a stencil clear (DB_RENDER_CONTROL.STENCIL_CLEAR_ENABLE) writes the stencil of
+    // every pixel the draw covers, even with the stencil test off: without the buffer attached
+    // the clear was dropped and old stencil bits stayed behind.
+    const bool stencil_clear = stencil_valid && render_control.stencil_clear_enable;
+
     const bool needs_depth = depth_write || depth_can_reject || depth_bounds || depth_maintenance;
-    const bool needs_stencil = stencil_has_effect || stencil_maintenance;
+    const bool needs_stencil = stencil_has_effect || stencil_maintenance || stencil_clear;
     const bool needs_attachment = needs_depth || needs_stencil;
 
     return {
