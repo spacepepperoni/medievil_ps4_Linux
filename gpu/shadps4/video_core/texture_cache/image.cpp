@@ -449,6 +449,21 @@ ImageView& Image::FindView(const ImageViewInfo& view_info, bool ensure_guest_sam
     return (*slot_image_views)[view_id];
 }
 
+// Linux fork: layouts nothing can write in. Another read in the same one needs no barrier: they
+// were ~10,600 per 5 s of render pass breaks in MediEvil's Pumpkin Gorge (attachment read ->
+// shader read of the depth buffer). GOW3_READ_BARRIERS=1: a barrier for every access change.
+static bool ReadOnlyLayout(vk::ImageLayout layout) {
+    static const bool keep = [] {
+        const char* env = std::getenv("GOW3_READ_BARRIERS");
+        return env && env[0] == '1';
+    }();
+    return !keep && (layout == vk::ImageLayout::eDepthStencilReadOnlyOptimal ||
+                     layout == vk::ImageLayout::eDepthReadOnlyOptimal ||
+                     layout == vk::ImageLayout::eStencilReadOnlyOptimal ||
+                     layout == vk::ImageLayout::eShaderReadOnlyOptimal ||
+                     layout == vk::ImageLayout::eReadOnlyOptimal);
+}
+
 void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
                         vk::PipelineStageFlags2 dst_stage,
                         std::optional<SubresourceRange> subres_range) {
@@ -507,6 +522,11 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
                                              vk::AccessFlagBits2::eShaderWrite |
                                              vk::AccessFlagBits2::eMemoryWrite;
                 const bool is_write = static_cast<bool>(state.access_mask & write_flags);
+                if (!is_write && state.layout == dst_layout && ReadOnlyLayout(dst_layout)) {
+                    state.access_mask |= dst_mask;
+                    state.pl_stage |= dst_stage;
+                    continue;
+                }
                 if (state.layout != dst_layout || state.access_mask != dst_mask || is_write) {
                     if (merge && barriers.size() > first_barrier) {
                         auto& last = barriers.back();
@@ -556,6 +576,11 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
                                      vk::AccessFlagBits2::eMemoryWrite;
         const bool is_write = static_cast<bool>(last_state.access_mask & write_flags);
         if (last_state.layout == dst_layout && last_state.access_mask == dst_mask && !is_write) {
+            return;
+        }
+        if (!is_write && last_state.layout == dst_layout && ReadOnlyLayout(dst_layout)) {
+            last_state.access_mask |= dst_mask;
+            last_state.pl_stage |= dst_stage;
             return;
         }
 
