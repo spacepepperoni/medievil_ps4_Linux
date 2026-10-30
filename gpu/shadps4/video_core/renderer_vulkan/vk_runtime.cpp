@@ -7,6 +7,11 @@
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
+#include <chrono>
+#include <unordered_map>
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -934,6 +939,38 @@ void Runtime::FlushBarriers() {
         largest_batch = image_barriers.size();
         std::printf("Barriers: %zu image barriers in one batch (largest so far)\n", largest_batch);
         std::fflush(stdout);
+    }
+    // Linux fork: GOW3_PASS_BREAKS=1 also counts which caller flushes barriers inside an active
+    // render pass, and whether they change image layouts or only order memory.
+    static const bool pass_breaks = [] {
+        const char* env = std::getenv("GOW3_PASS_BREAKS");
+        return env && env[0] == '1';
+    }();
+    if (pass_breaks && scheduler.IsRendering()) {
+        static std::unordered_map<void*, std::pair<u64, u64>> callers; // images, memory-only
+        static auto next = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        auto& entry = callers[__builtin_return_address(0)];
+        (image_barriers.empty() ? entry.second : entry.first) += 1;
+        if (std::chrono::steady_clock::now() >= next) {
+            std::vector<std::pair<u64, void*>> top;
+            for (const auto& [caller, c] : callers) top.emplace_back(c.first + c.second, caller);
+            std::ranges::sort(top, std::greater{});
+            std::string line;
+            for (size_t i = 0; i < std::min<size_t>(8, top.size()); ++i) {
+                uintptr_t offset = reinterpret_cast<uintptr_t>(top[i].second);
+#ifndef _WIN32
+                Dl_info info{};
+                if (dladdr(top[i].second, &info) && info.dli_fbase) {
+                    offset -= reinterpret_cast<uintptr_t>(info.dli_fbase);
+                }
+#endif
+                const auto& c = callers[top[i].second];
+                line += fmt::format(" +{:#x}={}img/{}mem", offset, c.first, c.second);
+            }
+            std::printf("Barrier flushes in a pass (5 s):%s\n", line.c_str());
+            callers.clear();
+            next = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        }
     }
     scheduler.EndRendering();
     scheduler.Record([memory = memory_barrier, has_memory = dep_info.memoryBarrierCount != 0,
