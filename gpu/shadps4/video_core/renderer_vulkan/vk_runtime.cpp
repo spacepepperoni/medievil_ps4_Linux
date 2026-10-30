@@ -951,6 +951,24 @@ void Runtime::FlushBarriers() {
         static auto next = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         auto& entry = callers[__builtin_return_address(0)];
         (image_barriers.empty() ? entry.second : entry.first) += 1;
+        // Which layout changes (old -> new, aspect, size of the first barrier's image).
+        static std::unordered_map<std::string, u64> kinds;
+        for (const auto& b : image_barriers) {
+            kinds[fmt::format("{}->{} {}", vk::to_string(b.oldLayout), vk::to_string(b.newLayout),
+                              vk::to_string(b.subresourceRange.aspectMask))]++;
+        }
+        static auto next_kinds = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        if (std::chrono::steady_clock::now() >= next_kinds) {
+            std::vector<std::pair<u64, std::string>> top;
+            for (const auto& [k, n] : kinds) top.emplace_back(n, k);
+            std::ranges::sort(top, std::greater{});
+            for (size_t i = 0; i < std::min<size_t>(6, top.size()); ++i) {
+                std::printf("Barrier kind in a pass (5 s): %llu x %s\n",
+                            static_cast<unsigned long long>(top[i].first), top[i].second.c_str());
+            }
+            kinds.clear();
+            next_kinds = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        }
         if (std::chrono::steady_clock::now() >= next) {
             std::vector<std::pair<u64, void*>> top;
             for (const auto& [caller, c] : callers) top.emplace_back(c.first + c.second, caller);
