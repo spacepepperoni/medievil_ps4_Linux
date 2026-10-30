@@ -244,6 +244,9 @@ DECK_FPS = [('30', ('30 (recommended)',)), ('60', ('60',))]
 # medievil.ini values (the game and the in-game menu read the same file).
 DECK_SETTINGS = {
     'display_mode': 'fullscreen',         # gamescope (Game Mode) scales the window to the screen
+    'engine_fps': '60',                   # the Deck frame rate (30/60) is the limit below it
+    'ue4_upscale': 'off',                 # the 720p scene is already the Deck's scale
+    'fsr1': '0',
     # The 3D scene at 720p inside the game's 1080p output (gamescope scales that to the screen).
     # 720p_native (the whole output at 1280x720) showed the 1080p loading screens and movies
     # cropped, zoomed in with illegible text; at 30 FPS the Deck holds 720p the same.
@@ -280,11 +283,47 @@ def deck_updates(settings, ini_path):
         settings['deck_prompts'] = changed = True
         if settings.get('deck_mode') and settings.get('pad_style', 'playstation') == 'playstation':
             settings['pad_style'] = 'steamdeck'
+    if not settings.get('deck_locks2'):
+        # Engine frame rate, upscaling and FSR 1 joined the locked Steam Deck values.
+        settings['deck_locks2'] = changed = True
+        if settings.get('deck_mode'):
+            graphics_options.write_keys(ini_path, {key: DECK_SETTINGS[key]
+                                                   for key in ('engine_fps', 'ue4_upscale', 'fsr1')})
     if not settings.get('deck_720p'):
         settings['deck_720p'] = changed = True
         if settings.get('deck_mode') and \
                 graphics_options.read_ini(ini_path).get('render_resolution') == '720p_native':
             graphics_options.write_keys(ini_path, {'render_resolution': '720p'})
+    return changed
+
+
+# ---- Options the launcher no longer shows -------------------------------------------------------
+# Switching these could break the game (wrong colours or lighting, hangs, testing-only clocks), so
+# the launcher leaves them out and puts them back to their defaults before every start: also when
+# an older launcher or the in-game menu changed them. extra-env.txt still overrides them for tests.
+HIDDEN_PAGES = ('patches',)  # its one built-in patch (the 4K framebuffer pool) must stay on
+HIDDEN_APP = {'hdr': False, 'draw_pipe': '', 'readbacks': '', 'pipeline_binary_cache': True, 'perf_diag': False,
+              'frame_capture_key': False, 'frame_stats': False, 'gpu_profile': False, 'vk_validation': False,
+              'record_inputs': False, 'patches_dir': ''}
+HIDDEN_INI = {'stale_readback': '0', 'deferred_readback': '1'}
+
+
+def hidden_defaults(settings, ini_path):
+    """Puts the hidden options back to their defaults (settings.json and medievil.ini).
+    Returns True when settings.json changed (to be saved)."""
+    import graphics_options
+    changed = False
+    for key, value in HIDDEN_APP.items():
+        if key in settings and settings[key] != value:
+            settings[key] = value
+            changed = True
+    if 'game_patches' in settings:  # the game's own patch list (defaults: on)
+        del settings['game_patches']
+        changed = True
+    ini = graphics_options.read_ini(ini_path)
+    stale = {key: value for key, value in HIDDEN_INI.items() if key in ini and ini[key] != value}
+    if stale:
+        graphics_options.write_keys(ini_path, stale)
     return changed
 
 
@@ -310,16 +349,43 @@ def get_var(launcher, key, ini_flags):
     return ('1' if value else '0') if key in ini_flags else str(value)
 
 
+def locked_looks(launcher, theme):
+    """Check box images for a locked setting (dimmed), as ttk image element states."""
+    try:
+        from PIL import Image
+        n = max(14, int(16 * launcher.dpi))
+        dim = []
+        for checked in (True, False):
+            image = theme.check_box(n, checked)
+            image.putalpha(image.getchannel('A').point(lambda a: a * 2 // 5))
+            dim.append(launcher.photo(image))
+        return ('disabled selected', dim[0]), ('disabled', dim[1])
+    except ImportError:
+        return ()
+
+
+def set_enabled(widget, enabled):
+    """A setting's control and the title of its row (the cell to its left), greyed out or not."""
+    try:
+        widget.configure(state=('readonly' if widget.winfo_class() == 'TCombobox' else 'normal') if enabled
+                         else 'disabled')
+        info = widget.grid_info()
+        if not info or int(info['column']) < 1:
+            return
+        for cell in widget.master.grid_slaves(row=int(info['row']), column=int(info['column']) - 1):
+            for label in (cell, *cell.winfo_children()):
+                if label.winfo_class() == 'TLabel':
+                    label.state(['!disabled'] if enabled else ['disabled'])
+    except Exception:
+        pass
+
+
 def deck_lock(launcher, on):
-    for key in (*DECK_LOCKED,):
+    for key in DECK_LOCKED:
         for widget in getattr(launcher, 'deck_widgets', {}).get(key, []):
-            try:
-                widget.configure(state='disabled' if on else ('readonly' if widget.winfo_class() == 'TCombobox'
-                                                              else 'normal'))
-            except Exception:
-                pass
+            set_enabled(widget, not on)
     for widget in getattr(launcher, 'deck_fps_widgets', []):
-        widget.configure(state='readonly' if on else 'disabled')
+        set_enabled(widget, on)
 
 
 def deck_switch(launcher, ini_flags):
@@ -350,21 +416,20 @@ def track_widget(launcher, key, widget):
 def build_deck_section(launcher, frame, _, ini_flags):
     """The Steam Deck section at the top of the Display page."""
     launcher.section(frame, _('Steam Deck'), top=4)
-    launcher.check(frame, 'deck_mode', 'app', _('Steam Deck mode'),
-                   _('Fullscreen, 720p render resolution, Low graphics quality and the frame rate below; those '
-                     'settings are locked while it is on. Turn it off to choose your own again.'))
+    # Fullscreen, 720p render resolution, Low graphics quality and the frame rate below; those
+    # settings are locked while it is on.
+    launcher.check(frame, 'deck_mode', 'app', _('Steam Deck mode'))
     box = launcher.choice(frame, 'deck_fps', 'app', DECK_FPS, width=24)
     launcher.row(frame, _('Steam Deck frame rate'), box)
-    launcher.check(frame, 'deck_steady_clock', 'app', _('Steady game clock'),
-                   _('The game moves exactly one frame step per frame at the frame rate above: smooth camera '
-                     'pans and fades instead of jumps after a slow frame; a heavy moment runs a little slower '
-                     'instead. Steam Deck mode only.'))
+    # The game moves exactly one frame step per frame at the frame rate above (smooth pans and fades
+    # after a slow frame); Steam Deck mode only.
+    clock = launcher.check(frame, 'deck_steady_clock', 'app', _('Steady game clock'))
     launcher.section(frame, _('Sound'))
+    # The game also plays delayed copies of its sound effects on the surround channels; in stereo
+    # they sound doubled. Off leaves them out (front channels only).
     launcher.row(frame, _('Surround sounds in stereo'), launcher.choice(frame, 'stereo_surround', 'app', STEREO_SURROUND,
-                                                                       width=24),
-                 _('The game also plays delayed copies of its sound effects on the surround channels; in stereo '
-                   'they sound doubled. Off leaves them out (front channels only).'))
-    launcher.deck_fps_widgets = [box]
+                                                                       width=24))
+    launcher.deck_fps_widgets = [box, clock]
     launcher.var('deck_mode', 'app').trace_add('write', lambda *_a: deck_switch(launcher, ini_flags))
     launcher.var('deck_fps', 'app').trace_add('write', lambda *_a: launcher.var('deck_mode', 'app').get() and
                                              set_var(launcher, 'fps_limit', launcher.var('deck_fps', 'app').get(),
