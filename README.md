@@ -3,6 +3,7 @@
 **MediEvil (PS4, 2019) running natively on Linux, forked by spacepepperoni from [bc160201983](https://github.com/bc160201983/medievil_2019_pc_port).**
 
 **This client is a launcher that starts MediEvil, adds it to your desktop or adds it to your Steam Library. This fork features auto-updates and a Steam Deck mode that optimizes the game for the Steam Deck.**
+<img width="1280" height="800" alt="image" src="https://github.com/user-attachments/assets/6e044f3a-31e0-40d8-b56f-71134565899f" />
 
 ## AppImage
 1. Download **[MediEvil-x86_64.AppImage](https://github.com/spacepepperoni/medievil_ps4_Linux/releases/latest/download/MediEvil-x86_64.AppImage)**.
@@ -22,7 +23,7 @@ The launcher has a built-in updater that can be toggled on/off in Advanced.
 
 ## Files needed
 
-You must have your own copy of MediEvil (PS4, CUSA11227 or the European CUSA12982), as an unpacked folder (with `eboot.bin`) or a fake package (`.pkg`).
+You must have your own copy of MediEvil (PS4, CUSA11227 or the European CUSA12982), .pkg is also supported.
 
 Point the launcher to it in the Game tab. Then Play, Add to Steam (recommended for Steam Deck) or create a Desktop shortcut.
 
