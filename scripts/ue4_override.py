@@ -421,6 +421,10 @@ def apply(game, resolution='native', quality='console', fps=60, debug_menu=False
     # Earlier builds wrote the `_P` spelling: on Linux it stayed behind, unread.
     (paks_dir(game) / OLD_PAK_NAME).unlink(missing_ok=True)
     values = dict(QUALITY.get(quality, {}))
+    # Linux fork: no preshadows (the static scenery's shadow on moving objects, projected in a box
+    # around each one): on the port the whole box darkened, a square around Dan that came and went
+    # with his idle animation (MediEvil's Pumpkin Gorge on the Steam Deck).
+    values['r.Shadow.Preshadows'] = '0'
     if quality in LOCAL_SHADOWS:
         size, threshold = LOCAL_SHADOWS[quality]
         values.update({'r.Shadow.MinResolution': str(size), 'r.Shadow.MaxResolution': str(size),

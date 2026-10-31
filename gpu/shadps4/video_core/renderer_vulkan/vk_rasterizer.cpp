@@ -61,12 +61,14 @@ static StencilClearMode GetStencilClearMode() {
 /// pass clear of the whole buffer, and only when the draw had the depth test and writes on:
 /// shadow maps that share one buffer lost each other's depth or kept stale depth (dark squares
 /// around the player in MediEvil's Pumpkin Gorge, coming and going with his idle animation).
-/// draw (default): the draw writes it (depth test always, viewport depth range = the clear
-/// value). load: the old render pass clear. GOW3_DEPTH_CLEAR=draw|load.
+/// draw: the draw writes it (depth test always, viewport depth range = the clear value).
+/// load (default): the render pass clear as before; the square around the player turned out to
+/// be the preshadows (ue4_override), and the Steam Deck release was tested with load.
+/// GOW3_DEPTH_CLEAR=draw|load.
 static bool DepthDrawClear(const AmdGpu::Regs& regs) {
     static const bool draw = [] {
         const char* env = std::getenv("GOW3_DEPTH_CLEAR");
-        return !(env && std::string_view{env} == "load");
+        return env && std::string_view{env} == "draw";
     }();
     return draw && regs.depth_render_control.depth_clear_enable && regs.depth_buffer.DepthValid();
 }
