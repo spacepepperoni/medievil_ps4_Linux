@@ -2118,13 +2118,13 @@ class GameJob:
             self.handle = None
 
 
-def play_without_window(settings):
+def play_without_window(settings, update_beside=True):
     """--play: the game with the saved settings (shortcuts, Steam). Output goes to the console
     when there is one and to <saves folder>/last_run.log."""
     attach_stdio()
     log_dir = Path(settings.get('user_dir') or DATA_DIR / 'user')
     log_dir.mkdir(parents=True, exist_ok=True)
-    if not WINDOWS:  # Linux fork: Steam/Game Mode never opens the launcher, so update beside the game
+    if not WINDOWS and update_beside:  # Linux fork: no update prompt could be shown, so update beside the game
         medievil_linux.update_in_background(latest_release, version_tuple, VERSION, settings)
     with open(log_dir / 'last_run.log', 'w', encoding='utf-8', buffering=1) as log:
         process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=game_environment(settings),
@@ -2144,8 +2144,8 @@ def version_tuple(text):
     return tuple(int(number) for number in re.findall(r'\d+', text or ''))
 
 
-def latest_release():
-    """(version, zip URL, page URL) of the newest GitHub release."""
+def latest_release(with_notes=False):
+    """(version, zip URL, page URL) of the newest GitHub release; with_notes: and its text."""
     request = urllib.request.Request(RELEASES_API, headers={'Accept': 'application/vnd.github+json',
                                                             'User-Agent': 'medievil-launcher'})
     with urllib.request.urlopen(request, timeout=15) as response:
@@ -2154,6 +2154,8 @@ def latest_release():
     wanted = '.zip' if WINDOWS else medievil_linux.ASSET.lower()  # Linux fork: the AppImage
     url = next((asset['browser_download_url'] for asset in release.get('assets', [])
                 if asset.get('name', '').lower().endswith(wanted)), None)
+    if with_notes:  # Linux fork: the Gaming Mode update prompt shows the release's update notes
+        return version, url, release.get('html_url') or RELEASES_PAGE, release.get('body') or ''
     return version, url, release.get('html_url') or RELEASES_PAGE
 
 
@@ -2202,7 +2204,18 @@ def main():
         shutil.rmtree(UPDATE_DIR, ignore_errors=True)  # what a finished update left behind
     # Without a usable game folder there is nothing to play yet: open the launcher instead.
     if '--play' in args and (Path(settings['game_dir'] or '.') / 'eboot.bin').is_file():
-        sys.exit(play_without_window(settings))
+        if WINDOWS:
+            sys.exit(play_without_window(settings))
+        # Linux fork: before the game, a newer release is offered in a prompt the controller can
+        # answer (Gaming Mode), as in the Uncharted fork; after an update the game closes, to be
+        # started again. Without a window for the prompt, the update runs beside the game.
+        answer = medievil_linux.startup_update_prompt(
+            settings, latest_release, version_tuple, VERSION,
+            theme.load_fonts(settings.get('game_dir'), CONFIG_DIR),
+            (BG, CARD, TEXT, MUTED, GOLD, BG))
+        if answer == 'updated':
+            sys.exit(0)
+        sys.exit(play_without_window(settings, update_beside=answer == 'error'))
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)  # sharp text on scaled displays
     except (AttributeError, OSError):

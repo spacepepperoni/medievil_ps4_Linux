@@ -684,10 +684,12 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                 // are served during the wait. They used to wait for the whole of it: in
                 // MediEvil's heavy views on the Steam Deck the game's threads stood 20-49 ms
                 // a frame in write faults while this thread waited 20-48 ms for the GPU, so the
-                // game's own work could not overlap the GPU's. GOW3_FRAME_WAIT_SERVE=0: off.
+                // game's own work could not overlap the GPU's. Off by default: with it the Hilltop
+                // Mausoleum's lights came out in random colours on the Steam Deck (pink, green),
+                // and the release build ran as well without it. GOW3_FRAME_WAIT_SERVE=1: on.
                 static const bool serve = [] {
                     const char* env = std::getenv("GOW3_FRAME_WAIT_SERVE");
-                    return !(env && env[0] == '0');
+                    return env && env[0] == '1';
                 }();
                 if (serve && liverpool) {
                     draw_scheduler.WaitServing(tick, [this] { liverpool->ProcessWaitingCommands(); });
