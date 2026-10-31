@@ -235,7 +235,10 @@ QUALITY = {
         'r.DepthOfFieldQuality': '1', 'r.ViewDistanceScale': '0.85',
     },
     'low': {
-        'r.ShadowQuality': '1', 'r.Shadow.MaxCSMResolution': '1024', 'r.Shadow.MaxResolution': '512',
+        # Linux fork: the sun's shadow at 2048 px and filtered (quality 3) instead of 1024 px and
+        # unfiltered (1): shadow edges no longer jump frame to frame while the camera follows the
+        # player (MediEvil's Pumpkin Gorge on the Steam Deck); the frame rate stayed the same.
+        'r.ShadowQuality': '3', 'r.Shadow.MaxCSMResolution': '2048', 'r.Shadow.MaxResolution': '512',
         # Linux fork: volumetric fog stays on, on a coarser grid. Off, the levels' height fog
         # drew its full inscattering colour without shadows: objects near the floor glowed pink
         # and whole areas washed out (MediEvil's Hilltop Mausoleum, Steam Deck mode), normal
