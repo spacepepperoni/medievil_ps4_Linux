@@ -29,6 +29,50 @@
 
 namespace Vulkan {
 
+/// Linux fork: how a GNM stencil clear (DB_RENDER_CONTROL.STENCIL_CLEAR_ENABLE on a draw) is
+/// done. The PS4 clears the stencil of exactly the pixels the draw covers.
+/// draw (default): the draw itself writes the clear value (stencil test always, replace).
+/// rect: cleared over the draw's scissor (b46; leftover bits outside the drawn shape left
+/// square-edged shadows in MediEvil's Pumpkin Gorge). load: the whole buffer (render pass clear).
+/// GOW3_STENCIL_CLEAR=draw|rect|load; the older GOW3_STENCIL_RECT_CLEAR=0 still means load.
+enum class StencilClearMode { Draw, Rect, Load };
+
+static StencilClearMode GetStencilClearMode() {
+    static const StencilClearMode mode = [] {
+        if (const char* env = std::getenv("GOW3_STENCIL_CLEAR")) {
+            const std::string_view value{env};
+            if (value == "rect") {
+                return StencilClearMode::Rect;
+            }
+            if (value == "load") {
+                return StencilClearMode::Load;
+            }
+        }
+        if (const char* env = std::getenv("GOW3_STENCIL_RECT_CLEAR"); env && env[0] == '0') {
+            return StencilClearMode::Load;
+        }
+        return StencilClearMode::Draw;
+    }();
+    return mode;
+}
+
+/// Linux fork: a GNM depth clear (DB_RENDER_CONTROL.DEPTH_CLEAR_ENABLE on a draw) writes the
+/// clear depth into the pixels the draw covers, like the stencil clear above. It was a render
+/// pass clear of the whole buffer, and only when the draw had the depth test and writes on:
+/// shadow maps that share one buffer lost each other's depth or kept stale depth (dark squares
+/// around the player in MediEvil's Pumpkin Gorge, coming and going with his idle animation).
+/// draw: the draw writes it (depth test always, viewport depth range = the clear value).
+/// load (default): the render pass clear as before; the square around the player turned out to
+/// be the preshadows (ue4_override), and the Steam Deck release was tested with load.
+/// GOW3_DEPTH_CLEAR=draw|load.
+static bool DepthDrawClear(const AmdGpu::Regs& regs) {
+    static const bool draw = [] {
+        const char* env = std::getenv("GOW3_DEPTH_CLEAR");
+        return env && std::string_view{env} == "draw";
+    }();
+    return draw && regs.depth_render_control.depth_clear_enable && regs.depth_buffer.DepthValid();
+}
+
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     // TODO(roamic): Add support for multiple viewports and geometry shaders when ViewportIndex
     // is encountered and implemented in the recompiler.
@@ -268,13 +312,18 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         const auto& hint = DbExtent();
         auto& [image_id, desc] = db_desc;
         const u32 tag = 2;
+        // Linux fork: a depth clear drawn into the buffer writes depth (DepthDrawClear).
+        auto depth_control = regs.depth_control;
+        if (DepthDrawClear(regs)) {
+            depth_control.depth_write_enable = 1;
+        }
         image_id = bound_images.emplace_back(FindTargetMemoized(
             desc, last_targets[AmdGpu::NUM_COLOR_BUFFERS],
             [&] {
-                std::construct_at(&desc, regs.depth_buffer, regs.depth_view, regs.depth_control,
+                std::construct_at(&desc, regs.depth_buffer, regs.depth_view, depth_control,
                                   htile_address, hint);
             },
-            tag, regs.depth_buffer, regs.depth_view, regs.depth_control, htile_address, hint));
+            tag, regs.depth_buffer, regs.depth_view, depth_control, htile_address, hint));
         auto& image = texture_cache.GetImage(image_id);
         image.binding.is_target = 1u;
     } else {
@@ -2893,9 +2942,12 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         auto& image = texture_cache.GetImage(image_id);
 
         const auto slice = image_view.info.range.base.layer;
+        // Linux fork: a depth clear drawn into the buffer is not a render pass clear (it covers
+        // only the draw), except where the pass targets the reduced scene copy.
+        const bool draw_clear = DepthDrawClear(regs) && !reduced;
         const bool is_depth_clear =
-            (regs.depth_render_control.depth_clear_enable && regs.depth_control.depth_enable &&
-             regs.depth_control.depth_write_enable) ||
+            (!draw_clear && regs.depth_render_control.depth_clear_enable &&
+             regs.depth_control.depth_enable && regs.depth_control.depth_write_enable) ||
             texture_cache.IsMetaCleared(htile_address, slice);
         const bool is_stencil_clear = regs.depth_render_control.stencil_clear_enable;
         texture_cache.TouchMeta(htile_address, slice, false);
@@ -2942,15 +2994,15 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
             // clear it wiped the whole stencil buffer, also the bits other lights still read:
             // shadows cut off along straight edges, flickering black shapes (MediEvil's Pumpkin
             // Gorge on the Steam Deck; worse with r.Shadow.StencilOptimization=0, which clears
-            // more often). It is now cleared over the draw's scissor inside the pass
-            // (ApplyPendingStencilClear). GOW3_STENCIL_RECT_CLEAR=0: the whole buffer as before.
-            static const bool rect_clear = [] {
-                const char* env = std::getenv("GOW3_STENCIL_RECT_CLEAR");
-                return !(env && env[0] == '0');
-            }();
+            // more often). Now the draw writes the clear value itself (UpdateDepthStencilState),
+            // or with GOW3_STENCIL_CLEAR=rect it is cleared over the draw's scissor inside the
+            // pass (ApplyPendingStencilClear). GOW3_STENCIL_CLEAR=load: the whole buffer.
+            const auto clear_mode = GetStencilClearMode();
             attachment.has_stencil = true;
-            if (is_stencil_clear && rect_clear && !reduced) {
-                pending_stencil_clear = regs.stencil_clear;
+            if (is_stencil_clear && clear_mode != StencilClearMode::Load && !reduced) {
+                if (clear_mode == StencilClearMode::Rect) {
+                    pending_stencil_clear = regs.stencil_clear;
+                }
                 attachment.clear_value[1] = 0u;
                 attachment.stencil_clear = false;
             } else {
@@ -3380,6 +3432,16 @@ void Rasterizer::UpdateViewportScissorState() const {
         }
     }
 
+    if (DepthDrawClear(regs)) {
+        // Linux fork: a depth clear drawn into the buffer writes the clear depth everywhere it
+        // covers (UpdateDepthStencilState); a viewport depth range of just that value does it.
+        const float depth = std::clamp(regs.depth_clear, 0.0f, 1.0f);
+        for (auto& viewport : viewports) {
+            viewport.minDepth = depth;
+            viewport.maxDepth = depth;
+        }
+    }
+
     if (viewports.empty()) {
         // Vulkan requires providing at least one viewport.
         constexpr vk::Viewport empty_viewport = {
@@ -3463,21 +3525,27 @@ void Rasterizer::UpdateDepthStencilState() const {
     auto& dynamic_state = scheduler.GetDynamicState();
 
     const auto depth_stencil = GetEffectiveDepthStencilState(regs);
-    const bool depth_test_enabled = depth_stencil.depth_test_enable;
+    // Linux fork: a depth clear drawn into the buffer: every covered pixel takes the clear
+    // depth (the viewport's depth range is the clear value, UpdateViewportScissorState).
+    const bool depth_draw_clear = DepthDrawClear(regs);
+    const bool depth_test_enabled = depth_stencil.depth_test_enable || depth_draw_clear;
     dynamic_state.SetDepthTestEnabled(depth_test_enabled);
-    dynamic_state.SetDepthWriteEnabled(depth_stencil.depth_write_enable &&
-                                       !regs.depth_render_control.depth_clear_enable);
-    if (depth_test_enabled) {
+    dynamic_state.SetDepthWriteEnabled(depth_draw_clear ||
+                                       (depth_stencil.depth_write_enable &&
+                                        !regs.depth_render_control.depth_clear_enable));
+    if (depth_draw_clear) {
+        dynamic_state.SetDepthCompareOp(vk::CompareOp::eAlways);
+    } else if (depth_test_enabled) {
         dynamic_state.SetDepthCompareOp(LiverpoolToVK::CompareOp(regs.depth_control.depth_func));
     }
 
-    const bool depth_bounds_test_enabled = depth_stencil.depth_bounds_enable;
+    const bool depth_bounds_test_enabled = depth_stencil.depth_bounds_enable && !depth_draw_clear;
     dynamic_state.SetDepthBoundsTestEnabled(depth_bounds_test_enabled);
     if (depth_bounds_test_enabled) {
         dynamic_state.SetDepthBounds(regs.depth_bounds_min, regs.depth_bounds_max);
     }
 
-    const auto depth_bias_enabled = regs.polygon_control.NeedsBias();
+    const auto depth_bias_enabled = regs.polygon_control.NeedsBias() && !depth_draw_clear;
     dynamic_state.SetDepthBiasEnabled(depth_bias_enabled);
     if (depth_bias_enabled) {
         const bool front = regs.polygon_control.enable_polygon_offset_front;
@@ -3526,6 +3594,24 @@ void Rasterizer::UpdateDepthStencilState() const {
             (front ? regs.poly_offset.front_offset : regs.poly_offset.back_offset) * constant_scale,
             regs.poly_offset.depth_bias,
             (front ? regs.poly_offset.front_scale : regs.poly_offset.back_scale) / 16.f);
+    }
+
+    // Linux fork: a stencil clear as the PS4 does it: every pixel the draw covers gets the clear
+    // value, whatever the depth test says and whether or not the game enabled the stencil test.
+    if (regs.depth_render_control.stencil_clear_enable && regs.depth_buffer.StencilValid() &&
+        GetStencilClearMode() == StencilClearMode::Draw) {
+        const StencilOps clear_ops{
+            .fail_op = vk::StencilOp::eReplace,
+            .pass_op = vk::StencilOp::eReplace,
+            .depth_fail_op = vk::StencilOp::eReplace,
+            .compare_op = vk::CompareOp::eAlways,
+        };
+        dynamic_state.SetStencilTestEnabled(true);
+        dynamic_state.SetStencilOps(clear_ops, clear_ops);
+        dynamic_state.SetStencilReferences(regs.stencil_clear, regs.stencil_clear);
+        dynamic_state.SetStencilWriteMasks(0xFFu, 0xFFu);
+        dynamic_state.SetStencilCompareMasks(0xFFu, 0xFFu);
+        return;
     }
 
     const bool stencil_test_enabled = depth_stencil.stencil_test_enable;

@@ -3,8 +3,10 @@ Linux build. Releases come from the fork, the AppImage updates itself (from the 
 beside the game when Steam starts it with --play), and Add to Steam puts MediEvil in the Steam
 library as a non-Steam game. Upstream files call in here at lines marked "Linux fork".
 """
+import ctypes
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import threading
@@ -87,7 +89,7 @@ def update_in_background(latest_release, version_tuple, current, settings):
 
     def work():
         try:
-            newest, url, _page = latest_release()
+            newest, url, _page = latest_release()[:3]
             if url and version_tuple(newest) > version_tuple(current):
                 install_appimage(url, appimage())
                 print(f'Update: version {newest} installed for the next start', flush=True)
@@ -96,6 +98,247 @@ def update_in_background(latest_release, version_tuple, current, settings):
     thread = threading.Thread(target=work, daemon=True)
     thread.start()
     return thread
+
+
+def load_with_neighbours(path):
+    """ctypes.CDLL of a bundled library whose dependencies sit beside it. Only the game process gets
+    that folder on its library path, so a missing dependency is loaded from there first."""
+    for _ in range(40):
+        try:
+            return ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL)
+        except OSError as error:
+            found = re.search(r'([^\s:/]+\.so[.\d]*): cannot open shared object', str(error))
+            missing = found.group(1) if found else path.name
+            beside = path.parent / missing
+            if missing == path.name or not beside.exists():
+                raise
+            load_with_neighbours(beside)  # now loaded, the next attempt finds it by soname
+    raise OSError(f'{path}: too many missing dependencies')
+
+
+class Gamepads:
+    """The controller through the AppImage's SDL3 (usr/lib/libSDL3.so.0), for the update prompt
+    shown before the game when Steam starts it. Steam's virtual gamepad is what a game launched in
+    Gaming Mode sees. Silently absent when SDL3 cannot be loaded."""
+    SOUTH, EAST, DPAD_UP, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT = 0, 1, 11, 12, 13, 14
+
+    def __init__(self):
+        self.sdl, self.pads, self.held, self.next_scan = None, [], set(), 0.0
+        try:
+            sdl = load_with_neighbours(Path(os.environ.get('APPDIR', '/')) / 'usr' / 'lib' / 'libSDL3.so.0')
+            sdl.SDL_SetHint.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+            sdl.SDL_SetHint(b'SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS', b'1')
+            sdl.SDL_Init.argtypes = [ctypes.c_uint32]
+            sdl.SDL_Init.restype = ctypes.c_bool
+            if not sdl.SDL_Init(0x00002000):  # SDL_INIT_GAMEPAD
+                return
+            sdl.SDL_GetGamepads.argtypes = [ctypes.POINTER(ctypes.c_int)]
+            sdl.SDL_GetGamepads.restype = ctypes.POINTER(ctypes.c_uint32)
+            sdl.SDL_OpenGamepad.argtypes = [ctypes.c_uint32]
+            sdl.SDL_OpenGamepad.restype = ctypes.c_void_p
+            sdl.SDL_GetGamepadButton.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            sdl.SDL_GetGamepadButton.restype = ctypes.c_bool
+            sdl.SDL_GetGamepadAxis.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            sdl.SDL_GetGamepadAxis.restype = ctypes.c_int16
+            sdl.SDL_free.argtypes = [ctypes.c_void_p]
+            self.sdl = sdl
+        except (OSError, AttributeError):
+            self.sdl = None
+
+    def scan(self):
+        if not self.sdl or time.monotonic() < self.next_scan:
+            return
+        self.next_scan = time.monotonic() + 1.0
+        count = ctypes.c_int(0)
+        ids = self.sdl.SDL_GetGamepads(ctypes.byref(count))
+        if ids and count.value and not self.pads:
+            self.pads = [p for p in (self.sdl.SDL_OpenGamepad(ids[i]) for i in range(count.value)) if p]
+        if ids:
+            self.sdl.SDL_free(ids)
+
+    def pressed(self):
+        """Buttons newly pressed since the last call: 'left', 'right', 'ok', 'back'."""
+        if not self.sdl:
+            return []
+        self.scan()
+        self.sdl.SDL_UpdateGamepads()
+        now = set()
+        for pad in self.pads:
+            get = self.sdl.SDL_GetGamepadButton
+            x = self.sdl.SDL_GetGamepadAxis(pad, 0)  # left stick X
+            if get(pad, self.DPAD_LEFT) or get(pad, self.DPAD_UP) or x < -20000:
+                now.add('left')
+            if get(pad, self.DPAD_RIGHT) or get(pad, self.DPAD_DOWN) or x > 20000:
+                now.add('right')
+            if get(pad, self.SOUTH):
+                now.add('ok')
+            if get(pad, self.EAST):
+                now.add('back')
+        new = now - self.held
+        self.held = now
+        return sorted(new)
+
+    def close(self):
+        if self.sdl:
+            self.sdl.SDL_Quit()  # the game opens the controller itself afterwards
+
+
+# The short list the Gaming Mode update prompt shows, written in the release text as a comment,
+# which GitHub does not display on the release page:
+#   <!-- Update notes:
+#   - Steam Deck performance improvements
+#   -->
+UPDATE_NOTES = re.compile(r'<!--\s*update notes:(.*?)-->', re.IGNORECASE | re.DOTALL)
+
+
+def update_highlights(notes, most=6):
+    """The release text's update notes as a list of lines (the leading - or * removed)."""
+    found = UPDATE_NOTES.search(notes or '')
+    if not found:
+        return []
+    lines = [line.strip().lstrip('-*').strip() for line in found.group(1).splitlines()]
+    return [line[:70] for line in lines if line][:most]
+
+
+def startup_update_prompt(settings, latest_release, version_tuple, current, fonts, colors):
+    """Before the game when Steam starts it (--play): if the fork has a newer release, a full-screen
+    prompt (controller, touch, mouse or keyboard) asks Update or Cancel, as in the Uncharted fork.
+    Update downloads it with a progress bar and then closes, to be started again. Returns
+    'updated', 'declined', 'none' or 'error' (no prompt could be shown).
+    colors: background, card, text, muted, gold, selected text."""
+    if not appimage() or not settings.get('update_check', True):
+        return 'none'
+    found = {}
+
+    def check():
+        try:
+            found['release'] = latest_release(with_notes=True)
+        except Exception:  # offline, rate limited: just play
+            pass
+    worker = threading.Thread(target=check, daemon=True)
+    worker.start()
+    worker.join(4.0)
+    release = found.get('release')
+    if not release or not release[1] or version_tuple(release[0]) <= version_tuple(current):
+        return 'none'
+    newest, url, _page, notes = release
+    newest = re.sub(r'^(\d+\.\d+\.\d+)\.(\d+)$', r'\1-linux.\2', newest)  # as the tag reads
+    try:
+        import queue
+        import tkinter as tk
+        root = tk.Tk()
+    except Exception:
+        return 'error'
+    bg, card, text, muted, gold, on_gold = colors
+    head = fonts.family.get('head') or 'DejaVu Sans'
+    body = fonts.family.get('body') or 'DejaVu Sans'
+    root.title('MediEvil update')
+    root.configure(bg=bg, cursor='')
+    root.geometry(f'{root.winfo_screenwidth()}x{root.winfo_screenheight()}+0+0')
+    root.attributes('-fullscreen', True)
+    box = tk.Frame(root, bg=bg)
+    box.place(relx=0.5, rely=0.5, anchor='center')
+    title = tk.Label(box, text='Update available', bg=bg, fg=gold, font=(head, 28))
+    title.pack(pady=(0, 18))
+    message = tk.Label(box, text=f'Version {newest} is ready to install.\nYou have version {current}.',
+                       bg=bg, fg=text, font=(body, 15), justify='center')
+    message.pack(pady=(0, 34))
+    highlights = update_highlights(notes)
+    if highlights:
+        points = tk.Frame(box, bg=bg)
+        points.pack(pady=(0, 34))
+        for point in highlights:
+            row = tk.Frame(points, bg=bg)
+            row.pack(anchor='w', pady=3)
+            tk.Label(row, text='•', bg=bg, fg=gold, font=(body, 15)).pack(side='left', padx=(0, 12))
+            tk.Label(row, text=point, bg=bg, fg=text, font=(body, 15)).pack(side='left')
+    buttons = tk.Frame(box, bg=bg)
+    buttons.pack()
+    state = {'choice': None, 'selected': 0, 'progress': None}
+    labels = []
+    for i, name in enumerate(('Update', 'Cancel')):
+        b = tk.Label(buttons, text=name, font=(head, 18), padx=46, pady=16, cursor='hand2')
+        b.grid(row=0, column=i, padx=18)
+        b.bind('<Button-1>', lambda _e, i=i: choose(i))
+        labels.append(b)
+    hint = tk.Label(box, text='A  select     B  cancel     ◀ ▶  move', bg=bg, fg=muted, font=(body, 11))
+    hint.pack(pady=(28, 0))
+    bar = tk.Canvas(box, width=560, height=22, bg=card, highlightthickness=0)
+    pads = Gamepads()
+    events = queue.Queue()
+
+    def paint():
+        for i, b in enumerate(labels):
+            selected = i == state['selected']
+            b.configure(bg=gold if selected else card, fg=on_gold if selected else text)
+
+    def choose(i):
+        state['selected'] = i
+        paint()
+        if i == 1:
+            state['choice'] = 'declined'
+            root.after(50, root.destroy)
+            return
+        buttons.pack_forget()
+        hint.pack_forget()
+        title.configure(text='Updating')
+        message.configure(text=f'Downloading version {newest}…')
+        bar.pack(pady=(10, 0))
+
+        def work():
+            try:
+                install_appimage(url, appimage(), lambda p: events.put(('progress', p)))
+                events.put(('done', None))
+            except (OSError, ValueError) as error:
+                events.put(('failed', str(error)))
+        threading.Thread(target=work, daemon=True).start()
+        state['progress'] = 0
+
+    def tick():
+        try:
+            while True:
+                kind, value = events.get_nowait()
+                if kind == 'progress':
+                    bar.delete('all')
+                    bar.create_rectangle(0, 0, 560 * value / 100, 22, fill=gold, width=0)
+                    message.configure(text=f'Downloading version {newest}… {value}%')
+                elif kind == 'done':
+                    title.configure(text='Update installed')
+                    message.configure(text=f'Version {newest} is installed.\n'
+                                           'The game will close now. Start it again to play.')
+                    state['choice'] = 'updated'
+                    root.after(5000, root.destroy)
+                elif kind == 'failed':
+                    message.configure(text=f'The update failed: {value[:80]}\nStarting the game…')
+                    state['choice'] = 'declined'
+                    root.after(3500, root.destroy)
+        except queue.Empty:
+            pass
+        if state['progress'] is None:  # still choosing
+            for key in pads.pressed():
+                if key in ('left', 'right'):
+                    state['selected'] = 1 - state['selected']
+                    paint()
+                elif key == 'ok':
+                    choose(state['selected'])
+                    break
+                elif key == 'back':
+                    choose(1)
+                    break
+        root.after(40, tick)
+
+    root.bind('<Left>', lambda _e: (state.update(selected=0), paint()))
+    root.bind('<Right>', lambda _e: (state.update(selected=1), paint()))
+    root.bind('<Tab>', lambda _e: (state.update(selected=1 - state['selected']), paint()))
+    root.bind('<Return>', lambda _e: state['progress'] is None and choose(state['selected']))
+    root.bind('<space>', lambda _e: state['progress'] is None and choose(state['selected']))
+    root.bind('<Escape>', lambda _e: state['progress'] is None and choose(1))
+    paint()
+    root.after(40, tick)
+    root.focus_force()
+    root.mainloop()
+    pads.close()
+    return state['choice'] or 'declined'
 
 
 def install_update(launcher, version_name, url, page, _, app_name):
