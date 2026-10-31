@@ -5,7 +5,7 @@
 **This client is a launcher that starts MediEvil, adds it to your desktop or adds it to your Steam Library. This fork features auto-updates and a Steam Deck mode that optimizes the game for the Steam Deck.**
 <img width="1280" height="800" alt="image" src="https://github.com/user-attachments/assets/6e044f3a-31e0-40d8-b56f-71134565899f" />
 
-## AppImage
+## Download
 1. Download **[MediEvil-x86_64.AppImage](https://github.com/spacepepperoni/medievil_ps4_Linux/releases/latest/download/MediEvil-x86_64.AppImage)**.
 2. Right-click it, open **Properties → Permissions** and tick **Is executable** (or
    **Allow executing file as program**).
