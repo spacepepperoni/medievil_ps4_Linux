@@ -424,6 +424,52 @@ def steam_command(steam, launcher_file):
     return str(exe), options
 
 
+# Steam library art for the shortcut, as in the Uncharted fork: the cover and the wide grid from
+# SteamGridDB (game 5249914, chosen October 2026; no API key needed for the files, and the pictures
+# stay on SteamGridDB), the hero cut from the player's own game (sce_sys/pic0.png, the key art
+# without the logo). Keys: the Steam grid file suffix.
+STEAMGRIDDB = {
+    'p': 'https://cdn2.steamgriddb.com/grid/5a60066d71a2224b723bf05d4800c38c.jpg',
+    '': 'https://cdn2.steamgriddb.com/grid/ba4576628a9d5b8db382c003abe2351d.png',
+}
+
+
+def steam_artwork(game_dir, grid_dir, appid, timeout=10):
+    """Library pictures for the shortcut with this id; returns the files written. A picture that
+    cannot be had is left out (Steam shows its own placeholder there)."""
+    grid_dir = Path(grid_dir)
+    pictures = {}
+    for suffix, url in STEAMGRIDDB.items():
+        try:
+            request = urllib.request.Request(url, headers={'User-Agent': 'medievil-linux-launcher'})
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                extension = '.jpg' if url.endswith('.jpg') else '.png'
+                pictures[f'{appid}{suffix}{extension}'] = response.read()
+        except OSError:
+            pass
+    try:  # the hero: 1920x620 through Dan, from the 1920x1080 key art
+        import io
+        from PIL import Image
+        with Image.open(Path(game_dir) / 'sce_sys' / 'pic0.png') as image:
+            image = image.convert('RGB').resize((1920, 1080))
+            out = io.BytesIO()
+            image.crop((0, 300, 1920, 920)).save(out, 'PNG')
+            pictures[f'{appid}_hero.png'] = out.getvalue()
+    except (ImportError, OSError, ValueError):
+        pass
+    written = []
+    try:
+        grid_dir.mkdir(parents=True, exist_ok=True)
+        for name, data in pictures.items():
+            for old in grid_dir.glob(f'{name.rsplit(".", 1)[0]}.*'):  # a .png where the new one is .jpg
+                old.unlink()
+            (grid_dir / name).write_bytes(data)
+            written.append(grid_dir / name)
+    except OSError:
+        pass
+    return written
+
+
 def add_to_steam(launcher, launcher_file, config_dir, port_dir, _, app_name):
     """MediEvil in the Steam library, started with the settings saved in the launcher."""
     import bbport_steam
@@ -467,6 +513,11 @@ def add_to_steam(launcher, launcher_file, config_dir, port_dir, _, app_name):
         for config in configs:
             bbport_steam.add_shortcut(config / 'shortcuts.vdf', STEAM_NAME, exe, str(start_dir),
                                       str(icon) if icon.is_file() else '', options, match_options=True)
+            try:  # library pictures (cover, wide grid, hero)
+                steam_artwork(launcher.app.get('game_dir') or '.', config / 'grid',
+                              bbport_steam.shortcut_id(f'"{exe}"', STEAM_NAME))
+            except Exception:
+                pass
     except (OSError, ValueError) as error:
         launcher.messagebox.showerror(app_name, _('Could not add MediEvil to Steam: {}').format(error))
         return
