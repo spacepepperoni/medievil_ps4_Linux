@@ -702,10 +702,6 @@ public:
     void Wait(u64 tick, std::source_location caller = std::source_location::current(),
               u64 submit_ns = 0);
 
-    /// Linux fork: Wait that calls `between` every half millisecond until the tick is done.
-    void WaitServing(u64 tick, const std::function<void()>& between,
-                     std::source_location caller = std::source_location::current());
-
     /// Attempts to execute operations whose tick the GPU has caught up with.
     void PopPendingOperations();
 

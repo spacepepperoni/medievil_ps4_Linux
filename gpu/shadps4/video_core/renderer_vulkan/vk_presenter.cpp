@@ -9,7 +9,6 @@
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "sdl_window.h"
-#include "video_core/amdgpu/liverpool.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
@@ -680,20 +679,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
             const u64 tick = recent_frame_ticks.front();
             recent_frame_ticks.pop_front();
             if (recent_frame_ticks.size() == frames_ahead) {
-                // Linux fork: guest threads whose write fault or read back needs this thread
-                // are served during the wait. They used to wait for the whole of it: in
-                // MediEvil's heavy views on the Steam Deck the game's threads stood 20-49 ms
-                // a frame in write faults while this thread waited 20-48 ms for the GPU, so the
-                // game's own work could not overlap the GPU's. GOW3_FRAME_WAIT_SERVE=0: off.
-                static const bool serve = [] {
-                    const char* env = std::getenv("GOW3_FRAME_WAIT_SERVE");
-                    return !(env && env[0] == '0');
-                }();
-                if (serve && liverpool) {
-                    draw_scheduler.WaitServing(tick, [this] { liverpool->ProcessWaitingCommands(); });
-                } else {
-                    draw_scheduler.Wait(tick);
-                }
+                draw_scheduler.Wait(tick);
             }
         }
     }

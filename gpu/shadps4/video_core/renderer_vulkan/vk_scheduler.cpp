@@ -496,29 +496,6 @@ void Scheduler::Wait(u64 tick, std::source_location caller, u64 submit_ns) {
     }
 }
 
-void Scheduler::WaitServing(u64 tick, const std::function<void()>& between,
-                            std::source_location caller) {
-    if (tick >= work_semaphore.CurrentTick()) {
-        Wait(tick, caller);
-        return;
-    }
-    const bool diagnose = WaitDiagnostics::Enabled();
-    const auto start = diagnose ? std::chrono::steady_clock::now()
-                                : std::chrono::steady_clock::time_point{};
-    {
-        Gow3Stats::WaitTimer timer{Gow3Stats::tick_wait_ns};
-        constexpr u64 Slice = 500'000; // ns
-        while (!work_semaphore.WaitFor(tick, Slice)) {
-            between();
-        }
-    }
-    if (diagnose) {
-        WaitDiagnostics::Get().Add(caller.file_name(), caller.line(), 0,
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - start).count());
-    }
-}
-
 void Scheduler::PopPendingOperations() {
     if (num_pending_ops.load(std::memory_order_acquire) == 0) {
         return; // every draw comes here

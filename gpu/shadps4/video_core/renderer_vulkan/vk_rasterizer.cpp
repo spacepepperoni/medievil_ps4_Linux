@@ -29,33 +29,6 @@
 
 namespace Vulkan {
 
-/// Linux fork: how a GNM stencil clear (DB_RENDER_CONTROL.STENCIL_CLEAR_ENABLE on a draw) is
-/// done. The PS4 clears the stencil of exactly the pixels the draw covers.
-/// draw (default): the draw itself writes the clear value (stencil test always, replace).
-/// rect: cleared over the draw's scissor (b46; leftover bits outside the drawn shape left
-/// square-edged shadows in MediEvil's Pumpkin Gorge). load: the whole buffer (render pass clear).
-/// GOW3_STENCIL_CLEAR=draw|rect|load; the older GOW3_STENCIL_RECT_CLEAR=0 still means load.
-enum class StencilClearMode { Draw, Rect, Load };
-
-static StencilClearMode GetStencilClearMode() {
-    static const StencilClearMode mode = [] {
-        if (const char* env = std::getenv("GOW3_STENCIL_CLEAR")) {
-            const std::string_view value{env};
-            if (value == "rect") {
-                return StencilClearMode::Rect;
-            }
-            if (value == "load") {
-                return StencilClearMode::Load;
-            }
-        }
-        if (const char* env = std::getenv("GOW3_STENCIL_RECT_CLEAR"); env && env[0] == '0') {
-            return StencilClearMode::Load;
-        }
-        return StencilClearMode::Draw;
-    }();
-    return mode;
-}
-
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     // TODO(roamic): Add support for multiple viewports and geometry shaders when ViewportIndex
     // is encountered and implemented in the recompiler.
@@ -2969,15 +2942,15 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
             // clear it wiped the whole stencil buffer, also the bits other lights still read:
             // shadows cut off along straight edges, flickering black shapes (MediEvil's Pumpkin
             // Gorge on the Steam Deck; worse with r.Shadow.StencilOptimization=0, which clears
-            // more often). Now the draw writes the clear value itself (UpdateDepthStencilState),
-            // or with GOW3_STENCIL_CLEAR=rect it is cleared over the draw's scissor inside the
-            // pass (ApplyPendingStencilClear). GOW3_STENCIL_CLEAR=load: the whole buffer.
-            const auto clear_mode = GetStencilClearMode();
+            // more often). It is now cleared over the draw's scissor inside the pass
+            // (ApplyPendingStencilClear). GOW3_STENCIL_RECT_CLEAR=0: the whole buffer as before.
+            static const bool rect_clear = [] {
+                const char* env = std::getenv("GOW3_STENCIL_RECT_CLEAR");
+                return !(env && env[0] == '0');
+            }();
             attachment.has_stencil = true;
-            if (is_stencil_clear && clear_mode != StencilClearMode::Load && !reduced) {
-                if (clear_mode == StencilClearMode::Rect) {
-                    pending_stencil_clear = regs.stencil_clear;
-                }
+            if (is_stencil_clear && rect_clear && !reduced) {
+                pending_stencil_clear = regs.stencil_clear;
                 attachment.clear_value[1] = 0u;
                 attachment.stencil_clear = false;
             } else {
@@ -3553,24 +3526,6 @@ void Rasterizer::UpdateDepthStencilState() const {
             (front ? regs.poly_offset.front_offset : regs.poly_offset.back_offset) * constant_scale,
             regs.poly_offset.depth_bias,
             (front ? regs.poly_offset.front_scale : regs.poly_offset.back_scale) / 16.f);
-    }
-
-    // Linux fork: a stencil clear as the PS4 does it: every pixel the draw covers gets the clear
-    // value, whatever the depth test says and whether or not the game enabled the stencil test.
-    if (regs.depth_render_control.stencil_clear_enable && regs.depth_buffer.StencilValid() &&
-        GetStencilClearMode() == StencilClearMode::Draw) {
-        const StencilOps clear_ops{
-            .fail_op = vk::StencilOp::eReplace,
-            .pass_op = vk::StencilOp::eReplace,
-            .depth_fail_op = vk::StencilOp::eReplace,
-            .compare_op = vk::CompareOp::eAlways,
-        };
-        dynamic_state.SetStencilTestEnabled(true);
-        dynamic_state.SetStencilOps(clear_ops, clear_ops);
-        dynamic_state.SetStencilReferences(regs.stencil_clear, regs.stencil_clear);
-        dynamic_state.SetStencilWriteMasks(0xFFu, 0xFFu);
-        dynamic_state.SetStencilCompareMasks(0xFFu, 0xFFu);
-        return;
     }
 
     const bool stencil_test_enabled = depth_stencil.stencil_test_enable;
