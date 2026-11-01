@@ -223,6 +223,26 @@ static uint32_t gamepad_buttons(void) {
     for (int p=0;p<gamepad_count;++p)
         for (size_t i=0;i<pad_map.count;++i)
             if (SDL_GetGamepadButton(gamepads[p],(SDL_GamepadButton)pad_map.entries[i].source)) buttons|=pad_map.entries[i].ps;
+    /* Linux fork: a D-pad direction counts as released only once it stays released for
+     * GOW3_DPAD_DEBOUNCE_MS (default 40): a contact that bounces (pressed, released and pressed
+     * again within a few milliseconds) was a second press when a frame's sample fell into the gap,
+     * and menus moved two entries (the merchant on the Steam Deck). 0: off. */
+    static int debounce_us=-1;
+    if (debounce_us<0) { const char *e=getenv("GOW3_DPAD_DEBOUNCE_MS"); debounce_us=(e && *e ? atoi(e) : 40)*1000; if (debounce_us<0) debounce_us=0; }
+    if (debounce_us) {
+        static const uint32_t dirs[4]={BTN_UP,BTN_DOWN,BTN_LEFT,BTN_RIGHT};
+        static uint64_t released_at[4];
+        static uint32_t shown;
+        const uint64_t now=now_us();
+        for (int i=0;i<4;++i) {
+            const uint32_t b=dirs[i];
+            if (buttons & b) { released_at[i]=0; shown|=b; continue; }
+            if (!(shown & b)) continue;
+            if (!released_at[i]) released_at[i]=now;
+            if (now-released_at[i]<(uint64_t)debounce_us) buttons|=b;
+            else shown&=~b;
+        }
+    }
     return buttons;
 }
 /* Linux fork: both back grips held (Steam Deck L4+R4, SDL's paddles), the recording toggle. */
@@ -658,11 +678,33 @@ static ABI int32_t pad_close(int32_t handle) {
     if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
     opened=0; return 0;
 }
+/* Linux fork: GOW3_PAD_TRACE=1 prints every change of the buttons the game gets, with the time,
+ * which call delivered them and how often the game calls scePadReadState / scePadRead. */
+static int pad_trace(void) {
+    static int on=-1;
+    if (on<0) { const char *e=getenv("GOW3_PAD_TRACE"); on=e && e[0]=='1'; }
+    return on;
+}
+static unsigned trace_state_calls, trace_read_calls;
+static void trace_buttons(const PadData *d, const char *api) {
+    static uint32_t last; static uint64_t start, window;
+    const uint64_t now=now_us();
+    if (!start) start=window=now;
+    if (d->buttons!=last) {
+        printf("Pad trace: %8.1f ms %s buttons 0x%05x (was 0x%05x)\n",(now-start)/1000.0,api,d->buttons,last);
+        last=d->buttons;
+    }
+    if (now-window>=5000000u) {
+        printf("Pad trace: %u scePadReadState and %u scePadRead calls in %.1f s\n",trace_state_calls,trace_read_calls,(now-window)/1e6);
+        trace_state_calls=trace_read_calls=0; window=now;
+    }
+}
 static ABI int32_t pad_read_state(int32_t handle, PadData *data) {
     if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
     if (!data) return ERR_INVALID_ARG;
     pthread_mutex_lock(&lock);
     sample(data); ++reads;
+    if (pad_trace()) { ++trace_state_calls; trace_buttons(data,"state"); }
     pthread_mutex_unlock(&lock);
     runtime_ue4_setres_poll();
     return 0;
@@ -671,6 +713,7 @@ static ABI int32_t pad_read_state(int32_t handle, PadData *data) {
 static ABI int32_t pad_read(int32_t handle, PadData *data, int32_t count) {
     if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
     if (!data || count<1 || count>64) return ERR_INVALID_ARG;
+    if (pad_trace()) { pthread_mutex_lock(&lock); ++trace_read_calls; --trace_state_calls; pthread_mutex_unlock(&lock); }
     pad_read_state(handle,data);
     return 1;
 }
