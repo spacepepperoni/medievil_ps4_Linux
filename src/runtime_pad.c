@@ -223,30 +223,24 @@ static uint32_t gamepad_buttons(void) {
     for (int p=0;p<gamepad_count;++p)
         for (size_t i=0;i<pad_map.count;++i)
             if (SDL_GetGamepadButton(gamepads[p],(SDL_GamepadButton)pad_map.entries[i].source)) buttons|=pad_map.entries[i].ps;
-    /* Linux fork: the Steam Deck's D-pad chatters: a single press arrives as pressed, released for
-     * 30-70 ms and pressed again, and menus moved two entries. A press of a direction within
-     * GOW3_DPAD_DEBOUNCE_MS (default 100) of its release is ignored until it is let go again.
-     * Releases pass at once: holding them back made every press longer than the menus' 0.2 s
-     * auto-repeat delay, and the merchant moved two entries per press. 0: off. */
+    /* Linux fork: a D-pad direction counts as released only once it stays released for
+     * GOW3_DPAD_DEBOUNCE_MS (default 40): a contact that bounces (pressed, released and pressed
+     * again within a few milliseconds) was a second press when a frame's sample fell into the gap,
+     * and menus moved two entries (the merchant on the Steam Deck). 0: off. */
     static int debounce_us=-1;
-    if (debounce_us<0) { const char *e=getenv("GOW3_DPAD_DEBOUNCE_MS"); debounce_us=(e && *e ? atoi(e) : 100)*1000; if (debounce_us<0) debounce_us=0; }
+    if (debounce_us<0) { const char *e=getenv("GOW3_DPAD_DEBOUNCE_MS"); debounce_us=(e && *e ? atoi(e) : 40)*1000; if (debounce_us<0) debounce_us=0; }
     if (debounce_us) {
         static const uint32_t dirs[4]={BTN_UP,BTN_DOWN,BTN_LEFT,BTN_RIGHT};
         static uint64_t released_at[4];
-        static uint32_t shown, ignored;
+        static uint32_t shown;
         const uint64_t now=now_us();
         for (int i=0;i<4;++i) {
             const uint32_t b=dirs[i];
-            if (!(buttons & b)) {
-                if (shown & b) released_at[i]=now;
-                shown&=~b; ignored&=~b;
-                continue;
-            }
-            if (ignored & b) { buttons&=~b; continue; }
-            if (!(shown & b) && released_at[i] && now-released_at[i]<(uint64_t)debounce_us) {
-                ignored|=b; buttons&=~b; continue;
-            }
-            shown|=b;
+            if (buttons & b) { released_at[i]=0; shown|=b; continue; }
+            if (!(shown & b)) continue;
+            if (!released_at[i]) released_at[i]=now;
+            if (now-released_at[i]<(uint64_t)debounce_us) buttons|=b;
+            else shown&=~b;
         }
     }
     return buttons;
