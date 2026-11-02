@@ -439,7 +439,7 @@ def apply(game, resolution='native', quality='console', fps=60, debug_menu=False
     values['r.Shadow.Preshadows'] = '0'
     # Linux fork: skinning and morph targets in the vertex shader instead of the GPU skin cache and
     # compute morph targets: their compute-written vertices came out stretched on the port (a long
-    # white spike on Dan's silver shield, a white plank in the Enchanted Earth opening cutscene).
+    # white spike on Dan's silver shield).
     values['r.SkinCache.Mode'] = '0'
     values['r.MorphTarget.Mode'] = '0'
     if quality in LOCAL_SHADOWS:
