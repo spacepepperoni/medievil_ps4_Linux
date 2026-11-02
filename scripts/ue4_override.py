@@ -250,7 +250,10 @@ QUALITY = {
         'r.TiledDeferredShading': '0',
         'r.SSR.Quality': '0', 'r.MotionBlurQuality': '0', 'r.DepthOfFieldQuality': '0',
         'r.LensFlareQuality': '0', 'r.SceneColorFringeQuality': '0', 'r.BloomQuality': '2',
-        'r.RefractionQuality': '0', 'r.ViewDistanceScale': '0.7', 'foliage.DensityScale': '0.6',
+        # Linux fork: full view distance (was 0.7): props with their own draw distance (walls,
+        # barrels) vanished under MediEvil's high top-down camera in the Sleeping Village and
+        # came back from the other side of the room; 30 FPS held.
+        'r.RefractionQuality': '0', 'r.ViewDistanceScale': '1', 'foliage.DensityScale': '0.6',
         'grass.DensityScale': '0.6',
     },
 }
