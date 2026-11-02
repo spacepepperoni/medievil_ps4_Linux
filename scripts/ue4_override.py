@@ -250,7 +250,10 @@ QUALITY = {
         'r.TiledDeferredShading': '0',
         'r.SSR.Quality': '0', 'r.MotionBlurQuality': '0', 'r.DepthOfFieldQuality': '0',
         'r.LensFlareQuality': '0', 'r.SceneColorFringeQuality': '0', 'r.BloomQuality': '2',
-        'r.RefractionQuality': '0', 'r.ViewDistanceScale': '0.7', 'foliage.DensityScale': '0.6',
+        # Linux fork: full view distance (was 0.7): props with their own draw distance (walls,
+        # barrels) vanished under MediEvil's high top-down camera in the Sleeping Village and
+        # came back from the other side of the room; 30 FPS held.
+        'r.RefractionQuality': '0', 'r.ViewDistanceScale': '1', 'foliage.DensityScale': '0.6',
         'grass.DensityScale': '0.6',
     },
 }
@@ -371,6 +374,15 @@ INFINITE_AMMO_EDITS = [
 ]
 
 
+# Linux fork: the firefly that follows Dan (Characters/Dan/BP_Firefly, OrbitTarget) jittered left
+# and right every frame. When it is not flying straight at its target its turn is
+# Lerp(turn, Speed / Radius, 0.4): the extra Speed / Radius degrees are not scaled by the frame
+# time, so it turns past the direction to the target and back again each frame, for good once a
+# landing or a jump made it overshoot. Alpha 0 keeps the turn that stops at the target direction.
+FIREFLY = 'OVERBITE/Content/Characters/Dan/BP_Firefly.uexp'
+FIREFLY_EDITS = [(bytes.fromhex('1ecdcccc3e16'), bytes.fromhex('1e0000000016'), 1)]
+
+
 # Voice language (medievil.ini ue4_voice): the game takes its spoken language from its text
 # language (GetWWiseLanguageFromLanguageID: LanguageIDToWWiseLanguageMap, else 'English(US)').
 # Both versions ship 15 voice languages. With a voice language chosen, that function skips the map
@@ -425,6 +437,11 @@ def apply(game, resolution='native', quality='console', fps=60, debug_menu=False
     # around each one): on the port the whole box darkened, a square around Dan that came and went
     # with his idle animation (MediEvil's Pumpkin Gorge on the Steam Deck).
     values['r.Shadow.Preshadows'] = '0'
+    # Linux fork: skinning and morph targets in the vertex shader instead of the GPU skin cache and
+    # compute morph targets: their compute-written vertices came out stretched on the port (a long
+    # white spike on Dan's silver shield).
+    values['r.SkinCache.Mode'] = '0'
+    values['r.MorphTarget.Mode'] = '0'
     if quality in LOCAL_SHADOWS:
         size, threshold = LOCAL_SHADOWS[quality]
         values.update({'r.Shadow.MinResolution': str(size), 'r.Shadow.MaxResolution': str(size),
@@ -471,7 +488,12 @@ def apply(game, resolution='native', quality='console', fps=60, debug_menu=False
     except (OSError, ValueError, ImportError) as error:
         print(f'Button pictures: PlayStation ({error})', flush=True)
         pictures = {}
-    if not values and not engine and not physics and not debug_menu and not infinite_ammo and not pictures and not voice:
+    try:
+        firefly = {FIREFLY: edited_asset(game, FIREFLY, FIREFLY_EDITS)}
+    except (ValueError, FileNotFoundError) as error:
+        print(f'Firefly fix: not available for this game build ({error})', flush=True)
+        firefly = {}
+    if not values and not engine and not physics and not debug_menu and not infinite_ammo and not pictures and not voice and not firefly:
         pak.unlink(missing_ok=True)
         return 'native 1080p, console quality, 60 FPS'
     files = {CONFIG: set_values(read_file(game, CONFIG), values, engine, physics)}
@@ -493,6 +515,7 @@ def apply(game, resolution='native', quality='console', fps=60, debug_menu=False
             print(f'Unlimited ammo: not available for this game build ({error})', flush=True)
             infinite_ammo = False
     files.update(pictures)
+    files.update(firefly)
     if voice:
         try:
             files[GAME_INSTANCE] = voice_language(game, voice)
