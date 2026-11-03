@@ -135,12 +135,37 @@ public:
     /// threads are not held up for the whole wait.
     void ProcessWaitingCommands();
 
+    /// Linux fork: GOW3_FRAME_WAIT_SERVE=1 (vk_presenter.cpp): waiting callers get their own queue.
+    static bool ServeWaits() {
+        static const bool serve = [] {
+            const char* env = std::getenv("GOW3_FRAME_WAIT_SERVE");
+            return env && env[0] == '1';
+        }();
+        return serve;
+    }
+
     template <bool wait_done = false>
     void SendCommand(auto&& func) {
         if constexpr (wait_done) {
             // Linux fork: a caller that waits (a guest thread's write fault or read back) goes
             // into its own queue, which the GPU command thread also serves while it waits for
-            // the GPU (ProcessWaitingCommands), and before the other commands (flips).
+            // the GPU (ProcessWaitingCommands), and before the other commands (flips). Only with
+            // GOW3_FRAME_WAIT_SERVE=1: taken ahead of the commands queued before it, the Hilltop
+            // Mausoleum's lights came out in random colours run to run on the Steam Deck.
+            if (!ServeWaits()) {
+                std::binary_semaphore sem{0};
+                {
+                    std::scoped_lock lk{submit_mutex};
+                    command_queue.emplace([&sem, &func] {
+                        func();
+                        sem.release();
+                    });
+                    ++num_commands;
+                    submit_cv.notify_one();
+                }
+                sem.acquire();
+                return;
+            }
             std::binary_semaphore sem{0};
             {
                 std::scoped_lock lk{submit_mutex};
