@@ -244,11 +244,15 @@ QUALITY = {
         # and whole areas washed out (MediEvil's Hilltop Mausoleum, Steam Deck mode), normal
         # again higher up. Defaults are 8 px cells and 128 slices.
         'r.Shadow.CSM.MaxCascades': '2', 'r.VolumetricFog.GridPixelSize': '16',
-        'r.VolumetricFog.GridSizeZ': '64', 'r.AmbientOcclusionLevels': '0',
+        'r.VolumetricFog.GridSizeZ': '64',
+        # Linux fork: ambient occlusion and screen-space reflections stay on (low turned both
+        # off): without them MediEvil's Asylum rooms came out shiny and over-bright, lit like
+        # daylight by the lava; 30 FPS held on the Steam Deck.
+        'r.AmbientOcclusionLevels': '-1', 'r.SSR.Quality': '3',
         # Linux fork: lights one by one instead of UE4's tiled compute pass: the Hilltop
         # Mausoleum held 30 FPS on the Deck's APU (pyro) instead of 21-23.
         'r.TiledDeferredShading': '0',
-        'r.SSR.Quality': '0', 'r.MotionBlurQuality': '0', 'r.DepthOfFieldQuality': '0',
+        'r.MotionBlurQuality': '0', 'r.DepthOfFieldQuality': '0',
         'r.LensFlareQuality': '0', 'r.SceneColorFringeQuality': '0', 'r.BloomQuality': '2',
         # Linux fork: full view distance (was 0.7): props with their own draw distance (walls,
         # barrels) vanished under MediEvil's high top-down camera in the Sleeping Village and
