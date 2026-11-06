@@ -270,10 +270,28 @@ static void set_host_name(const char *name) {
 #define exit_setjmp(t) setjmp((t)->exit_jump)
 #define exit_longjmp(t) longjmp((t)->exit_jump,1)
 #endif
+/* Guest threads start with the PS4's FPU state: MXCSR 0x9fc0 (flush to zero, denormals are zero)
+ * and the x87 control word 0x037f, as in the Uncharted port; they used the host's 0x1f80.
+ * GOW3_GUEST_MXCSR=<hex> picks another value; GOW3_GUEST_MXCSR=1f80 is the old host default. */
+void runtime_set_guest_fpu(void) {
+    static unsigned value=0x9fc0;
+    static int once;
+    if (!once) {
+        const char *env=getenv("GOW3_GUEST_MXCSR");
+        if (env) value=(unsigned)strtoul(env,NULL,16);
+        once=1;
+    }
+    if (!value) return;
+    uint32_t mxcsr=value;
+    uint16_t fpucw=0x037f;
+    __asm__ volatile("ldmxcsr %0" : : "m"(mxcsr));
+    __asm__ volatile("fldcw %0" : : "m"(fpucw));
+}
 static void *host_start(void *p) {
     GuestThread *t=p;
     attach(t);
     set_host_name(t->name);
+    runtime_set_guest_fpu();
     if (!exit_setjmp(t)) t->result=t->entry(t->argument);
     runtime_thread_keys_cleanup();
     pthread_mutex_lock(&lock); t->finished=1; ++exited; pthread_mutex_unlock(&lock);

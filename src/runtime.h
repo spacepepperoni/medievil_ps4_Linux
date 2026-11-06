@@ -67,6 +67,8 @@ int64_t runtime_file_stat(const char *path, void *guest_stat);
 int64_t runtime_file_fstat(int fd, void *guest_stat);
 int64_t runtime_file_getdents(int fd, char *buffer, uint64_t size, int64_t *base);
 void runtime_thread_keys_cleanup(void);
+/* The PS4's floating-point state for guest code on this thread (MXCSR, x87 control word). */
+void runtime_set_guest_fpu(void);
 /* Guest-visible errno values are FreeBSD's. */
 int32_t runtime_guest_errno(int host_errno);
 void *runtime_low_map(size_t size, int prot);
