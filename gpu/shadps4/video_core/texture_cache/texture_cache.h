@@ -461,6 +461,12 @@ private:
     Common::LeastRecentlyUsedCache<ImageId, u64> lru_cache;
     Common::LeastRecentlyUsedCache<u64, u64> sampler_lru_cache;
     const bool readback_linear_images;
+    /// Linux fork: tiled images up to this width also go back to RAM. 9 takes in UE4's sky light
+    /// result (9x1, read by the game once per level); GOW3_READBACK_MAX_WIDTH=8 is the old rule.
+    const u32 readback_max_width = [] {
+        const char* value = std::getenv("GOW3_READBACK_MAX_WIDTH");
+        return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 9u;
+    }();
     const bool deferred_readbacks = [] {
         const char* value = std::getenv("GOW3_DEFERRED_READBACK");
         return value && value[0] == '1';

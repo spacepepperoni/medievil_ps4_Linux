@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdio>
 #include <cstdlib>
+#include <set>
+#include <tuple>
 #include <string_view>
 #include <xxhash.h>
 #include "video_core/amdgpu/liverpool.h"
@@ -96,6 +99,19 @@ void TextureCache::RetireReadbacks() {
         [this](auto& entry) {
             if (entry.valid) {
                 entry.payload.Invalidate();
+                // Linux fork: what the small targets hold when the game gets them (lighting diag).
+                static int small_logged = 0;
+                if (entry.size >= 72 && entry.size <= 256 && small_logged < 120) {
+                    ++small_logged;
+                    const auto* words = reinterpret_cast<const u16*>(entry.payload.mapped);
+                    std::printf("Small readback %#llx %llu bytes:",
+                                static_cast<unsigned long long>(entry.address),
+                                static_cast<unsigned long long>(entry.size));
+                    for (u64 i = 0; i < entry.size / 2 && i < 36; ++i) {
+                        std::printf(" %04x", words[i]);
+                    }
+                    std::printf("\n");
+                }
                 Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(entry.address),
                     entry.payload.mapped, entry.size);
                 if (entry.watched) WatchReadback<false>(entry.address, entry.size);
@@ -1114,7 +1130,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc, Vi
     Image& image = slot_images[image_id];
     if (desc.type == BindingType::Storage) {
         image.flags |= ImageFlagBits::GpuModified;
-        if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
+        if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= readback_max_width) &&
             image.info.guest_address != 0) {
             std::unique_lock lk{download_images_mutex};
             download_images.emplace(image_id);
@@ -1145,9 +1161,23 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc, Vi
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     image.flags |= ImageFlagBits::GpuModified;
-    if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
+    if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= readback_max_width)) {
         std::unique_lock lk{download_images_mutex};
         download_images.emplace(image_id);
+    }
+    // Linux fork: which small targets the game renders to, tiled or not (lighting diag).
+    if (image.info.size.width <= 64 && image.info.size.height <= 2) {
+        static std::mutex small_mutex;
+        static std::set<std::tuple<VAddr, u32, u32>> small_seen;
+        std::scoped_lock small_lock{small_mutex};
+        if (small_seen.emplace(image.info.guest_address, image.info.size.width,
+                               image.info.size.height).second && small_seen.size() <= 64) {
+            std::printf("Small target %#llx %ux%u %s pitch %u %s\n",
+                        static_cast<unsigned long long>(image.info.guest_address),
+                        image.info.size.width, image.info.size.height,
+                        vk::to_string(image.info.pixel_format).c_str(), image.info.pitch,
+                        image.info.props.is_tiled ? "tiled" : "linear");
+        }
     }
     image.usage.render_target = 1u;
     UpdateImage(image_id);
