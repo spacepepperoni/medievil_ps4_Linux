@@ -65,13 +65,37 @@ def paks_dir(game):
     return Path(game) / 'overbite' / 'content' / 'paks'
 
 
-def read_index(path):
-    """{name: (offset, size, compression, zlib blocks)} of a version 7 pak (unencrypted index)."""
+# Pak versions this reads: 3 (compression and encryption flags) to 7 (encryption key GUID), whose index
+# entries are laid out alike, and 8-9 (compression methods by name), whose entries keep that layout.
+# MediEvil's North American release (CUSA11227) packs version 7, the European one (CUSA12982) version 3.
+# From version 5 a compressed entry's blocks are relative to the entry; before, they are file offsets.
+# Footers end in magic, version, index offset and size, and the index hash (44 bytes); version 8 adds the
+# names of its compression methods after it (4 or 5 names of 32 bytes), version 9 also a frozen-index byte.
+PAK_VERSIONS = range(3, 10)
+FOOTER_TAILS = (0, 4 * 32, 5 * 32, 5 * 32 + 1)
+
+
+def pak_info(path):
+    """(version, index offset, index size) of a pak; ValueError for another format."""
+    size = os.path.getsize(path)
     with open(path, 'rb') as f:
-        f.seek(os.path.getsize(path) - 44)
-        magic, version, index_offset, index_size = struct.unpack('<IIQQ', f.read(24))
-        if magic != PAK_MAGIC or version != 7:
-            raise ValueError(f'{path.name}: unsupported pak (magic {magic:#x}, version {version})')
+        for tail in FOOTER_TAILS:
+            if size < 44 + tail:
+                break
+            f.seek(size - 44 - tail)
+            magic, version, index_offset, index_size = struct.unpack('<IIQQ', f.read(24))
+            if magic == PAK_MAGIC and version in PAK_VERSIONS and (version >= 8) == (tail > 0):
+                return version, index_offset, index_size
+        f.seek(size - 44)
+        magic, version = struct.unpack('<II', f.read(8))
+    raise ValueError(f'{Path(path).name}: unsupported pak (magic {magic:#x}, version {version})')
+
+
+def read_index(path):
+    """{name: (offset, size, compression, zlib blocks)} of a pak with an unencrypted index; the blocks as
+    [start, end) file offsets whatever the version."""
+    version, index_offset, index_size = pak_info(path)
+    with open(path, 'rb') as f:
         f.seek(index_offset)
         index = f.read(index_size)
     pos = 0
@@ -99,8 +123,10 @@ def read_index(path):
         if compression:
             count_blocks, = struct.unpack_from('<i', index, pos)
             pos += 4
+            base = offset if version >= 5 else 0
             for _ in range(count_blocks):
-                blocks.append(struct.unpack_from('<qq', index, pos))  # [start, end) from the entry
+                start, end = struct.unpack_from('<qq', index, pos)
+                blocks.append((base + start, base + end))
                 pos += 16
         pos += 5
         entries[name] = (offset, size, compression, blocks)
@@ -116,9 +142,19 @@ def read_entry(pak, entry):
             return f.read(size)
         data = bytearray()
         for start, end in blocks:
-            f.seek(offset + start)
+            f.seek(start)
             data += zlib.decompress(f.read(end - start))
         return bytes(data)
+
+
+def game_pak_version(game):
+    """The pak version the game's own paks use (its engine reads that one), 7 when unknown."""
+    for pak in sorted(paks_dir(game).glob('pakchunk*-ps4.pak')):
+        try:
+            return pak_info(pak)[0]
+        except (OSError, ValueError):
+            continue
+    return 7
 
 
 def read_file(game, name):
@@ -136,12 +172,15 @@ def fstring(text):
 
 
 def entry(offset, data):
-    """FPakEntry, version 7, uncompressed and unencrypted (as UnrealPak writes it)."""
+    """FPakEntry, uncompressed and unencrypted (as UnrealPak writes it; the same from version 3 to 7)."""
     return struct.pack('<qqqi', offset, len(data), len(data), 0) + hashlib.sha1(data).digest() + b'\0' + \
         struct.pack('<I', 0)
 
 
-def write_pak(path, files, mount='../../../'):
+def write_pak(path, files, mount='../../../', version=7):
+    """A pak of these files in the version the game's own paks use (3 to 7; 7 for a newer game):
+    an engine only reads versions up to its own."""
+    version = version if 3 <= version <= 7 else 7
     body, records = b'', []
     for name, data in files.items():
         records.append((name, len(body)))
@@ -149,8 +188,11 @@ def write_pak(path, files, mount='../../../'):
     index = fstring(mount) + struct.pack('<i', len(files))
     for (name, offset), data in zip(records, files.values()):
         index += fstring(name) + entry(offset, data)
-    footer = bytes(16) + b'\0' + struct.pack('<IIQQ', PAK_MAGIC, 7, len(body), len(index)) + \
-        hashlib.sha1(index).digest()
+    footer = struct.pack('<IIQQ', PAK_MAGIC, version, len(body), len(index)) + hashlib.sha1(index).digest()
+    if version >= 4:
+        footer = b'\0' + footer           # the index is not encrypted
+    if version >= 7:
+        footer = bytes(16) + footer       # no encryption key
     tmp = path.with_suffix('.tmp')
     tmp.write_bytes(body + index + footer)
     tmp.replace(path)
@@ -526,7 +568,7 @@ def apply(game, resolution='native', quality='console', fps=60, debug_menu=False
         except (ValueError, FileNotFoundError) as error:
             print(f'Voice language: not available for this game build ({error})', flush=True)
             voice = ''
-    write_pak(pak, files)
+    write_pak(pak, files, version=game_pak_version(game))
     return (f'{"" if not pictures else prompts + " button pictures, "}'f'{resolution if percentage or output else "native 1080p"}'
             f'{f" (r.ScreenPercentage={percentage})" if percentage else ""}'
             f'{f" (native output {output})" if output else ""}'
