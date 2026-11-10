@@ -470,13 +470,11 @@ private:
         const char* value = std::getenv("GOW3_READBACK_MAX_WIDTH");
         return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 9u;
     }();
-    /// Linux fork: tiled images go back to RAM tiled, as the GPU leaves them on the PS4 (the game
-    /// detiles what it reads: the sky light's 9x1 result came back with 7 of its 9 values in the
-    /// wrong place, wrong colours by surface direction in the Hall of Heroes).
-    /// GOW3_READBACK_TILED=0: written linear as before.
+    /// Linux fork: GOW3_READBACK_TILED=1 writes tiled images back to RAM tiled (through the
+    /// tiler) instead of linear. Off: on pyro it did not fix the Hall of Heroes and made it worse.
     const bool readback_tiled = [] {
         const char* value = std::getenv("GOW3_READBACK_TILED");
-        return !value || value[0] != '0';
+        return value && value[0] == '1';
     }();
     const bool deferred_readbacks = [] {
         const char* value = std::getenv("GOW3_DEFERRED_READBACK");

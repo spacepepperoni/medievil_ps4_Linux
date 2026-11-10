@@ -101,7 +101,7 @@ void TextureCache::RetireReadbacks() {
                 entry.payload.Invalidate();
                 // Linux fork: what the small targets hold when the game gets them (lighting diag).
                 static int small_logged = 0;
-                if (entry.size >= 72 && entry.size <= 256 && small_logged < 120) {
+                if (((entry.size >= 72 && entry.size <= 256 && small_logged < 120) || entry.size == 1024)) {
                     ++small_logged;
                     const auto* words = reinterpret_cast<const u16*>(entry.payload.mapped);
                     std::printf("Small readback %#llx %llu bytes:",
