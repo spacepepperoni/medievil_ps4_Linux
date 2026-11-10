@@ -959,7 +959,34 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
     auto& src_image = slot_images[image_id];
     auto& new_image = slot_images[new_image_id];
 
-    RefreshImage(new_image);
+    // Linux fork: a render target that grows (UE4 draws a cube capture's faces and mips one at a
+    // time) holds GPU data RAM never received: loading the larger image from RAM filled the
+    // layers and mips the copy below does not cover with stale bytes, NaN among them (the sky
+    // light came out NaN in the Hall of Heroes). GOW3_EXPAND_CLEAR=1 starts it cleared instead.
+    static const bool expand_clear = [] {
+        const char* value = std::getenv("GOW3_EXPAND_CLEAR");
+        return value && value[0] == '1';
+    }();
+    const bool gpu_owned = expand_clear && True(src_image.flags & ImageFlagBits::GpuModified) &&
+                           False(src_image.flags & ImageFlagBits::Dirty) &&
+                           !new_image.info.props.is_depth && !new_image.info.props.is_block &&
+                           new_image.info.num_samples == 1;
+    if (gpu_owned) {
+        static int clear_logged = 0;
+        if (clear_logged < 24) {
+            ++clear_logged;
+            std::printf("Expand cleared: %#llx %s %ux%u mips %u->%u layers %u->%u\n",
+                        static_cast<unsigned long long>(info.guest_address),
+                        vk::to_string(info.pixel_format).c_str(), info.size.width, info.size.height,
+                        src_image.info.resources.levels, info.resources.levels,
+                        src_image.info.resources.layers, info.resources.layers);
+        }
+        const VideoCore::SubresourceRange all{
+            .base = {0, 0}, .extent = {info.resources.levels, info.resources.layers}};
+        runtime.ClearImage(&new_image, all, vk::ClearValue{vk::ClearColorValue{}});
+    } else {
+        RefreshImage(new_image);
+    }
     runtime.CopyImage(&src_image, &new_image);
 
     if (src_image.binding.is_bound || src_image.binding.is_target) {
