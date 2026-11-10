@@ -446,6 +446,11 @@ def apply(game, resolution='native', quality='console', fps=60, debug_menu=False
     # white spike on Dan's silver shield).
     values['r.SkinCache.Mode'] = '0'
     values['r.MorphTarget.Mode'] = '0'
+    # Linux fork: the sky light is captured again every frame. Its one capture at level load often
+    # came out over-bright on the port (overflow, NaN in its lighting), which drew pink and white
+    # strips along the floor edges and on Dan's feet (Hall of Heroes); a recapture is always right.
+    # Costs frames (pyro: 30 -> ~21 FPS in the Hall of Heroes).
+    values['r.SkylightUpdateEveryFrame'] = '1'
     if quality in LOCAL_SHADOWS:
         size, threshold = LOCAL_SHADOWS[quality]
         values.update({'r.Shadow.MinResolution': str(size), 'r.Shadow.MaxResolution': str(size),
