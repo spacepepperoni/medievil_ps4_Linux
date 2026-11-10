@@ -306,16 +306,49 @@ void TextureCache::ProcessDownloadImages() {
     }
 }
 
-std::optional<TextureCache::PendingDownload> TextureCache::RecordImageDownload(ImageId image_id) {
-    Image& image = slot_images[image_id];
-    if (False(image.flags & ImageFlagBits::GpuModified)) {
-        return std::nullopt;
+std::pair<Vulkan::StagingBufferRef, u32> TextureCache::RecordGuestLayoutDownload(Image& image,
+                                                                                 bool deferred) {
+    if (readback_tiled && image.info.props.is_tiled) {
+        // Every mip, in the image's guest layout (as the buffer cache does for texel buffers).
+        const u32 tiled_size = static_cast<u32>(image.info.guest_size);
+        const auto download =
+            runtime.GetStagingPool().Request(tiled_size, MemoryType::HostCached, 256, deferred);
+        boost::container::small_vector<vk::BufferImageCopy, 8> copies;
+        for (u32 mip = 0; mip < image.info.resources.levels; ++mip) {
+            const auto& mip_info = image.info.mips_layout[mip];
+            copies.push_back(vk::BufferImageCopy{
+                .bufferOffset = mip_info.offset,
+                .bufferRowLength = mip_info.pitch,
+                .bufferImageHeight = mip_info.height,
+                .imageSubresource{
+                    .aspectMask = image.aspect_mask & ~vk::ImageAspectFlagBits::eStencil,
+                    .mipLevel = mip,
+                    .baseArrayLayer = 0,
+                    .layerCount = image.info.resources.layers,
+                },
+                .imageOffset = {0, 0, 0},
+                .imageExtent = {std::max(image.info.size.width >> mip, 1u),
+                                std::max(image.info.size.height >> mip, 1u),
+                                std::max(image.info.size.depth >> mip, 1u)},
+            });
+        }
+        tile_manager.TileImage(image, copies, download.buffer, download.offset);
+        static int tiled_logged = 0;
+        if (tiled_logged < 16) {
+            ++tiled_logged;
+            std::printf("Tiled readback %#llx %ux%u %s %s, %u bytes\n",
+                        static_cast<unsigned long long>(image.info.guest_address),
+                        image.info.size.width, image.info.size.height,
+                        vk::to_string(image.info.pixel_format).c_str(),
+                        std::string(AmdGpu::NameOf(image.info.tile_mode)).c_str(), tiled_size);
+        }
+        return {download, tiled_size};
     }
     const u32 download_size = image.info.pitch * image.info.size.height * image.info.size.depth *
                               image.info.resources.layers * (image.info.num_bits / 8);
     ASSERT(download_size <= image.info.guest_size);
     const auto download =
-        runtime.GetStagingPool().Request(download_size, MemoryType::HostCached, 16, true);
+        runtime.GetStagingPool().Request(download_size, MemoryType::HostCached, 16, deferred);
     const vk::BufferImageCopy image_download = {
         .bufferOffset = download.offset,
         .bufferRowLength = image.info.pitch,
@@ -332,7 +365,16 @@ std::optional<TextureCache::PendingDownload> TextureCache::RecordImageDownload(I
         .imageExtent = {image.info.size.width, image.info.size.height, image.info.size.depth},
     };
     runtime.DownloadImage(&image, download.buffer, std::span{&image_download, 1});
-    return PendingDownload{image.info.guest_address, download_size, download};
+    return {download, download_size};
+}
+
+std::optional<TextureCache::PendingDownload> TextureCache::RecordImageDownload(ImageId image_id) {
+    Image& image = slot_images[image_id];
+    if (False(image.flags & ImageFlagBits::GpuModified)) {
+        return std::nullopt;
+    }
+    const auto [staging, size] = RecordGuestLayoutDownload(image, true);
+    return PendingDownload{image.info.guest_address, size, staging};
 }
 
 void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
@@ -342,27 +384,9 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
     if (False(image.flags & ImageFlagBits::GpuModified)) {
         return;
     }
-    const u32 download_size = image.info.pitch * image.info.size.height * image.info.size.depth *
-                              image.info.resources.layers * (image.info.num_bits / 8);
-    ASSERT(download_size <= image.info.guest_size);
-    const auto download =
-        runtime.GetStagingPool().Request(download_size, MemoryType::HostCached, 16, !sync);
-    const vk::BufferImageCopy image_download = {
-        .bufferOffset = download.offset,
-        .bufferRowLength = image.info.pitch,
-        .bufferImageHeight = image.info.size.height,
-        .imageSubresource =
-            {
-                .aspectMask = image.info.props.is_depth ? vk::ImageAspectFlagBits::eDepth
-                                                        : vk::ImageAspectFlagBits::eColor,
-                .mipLevel = 0,
-                .baseArrayLayer = 0,
-                .layerCount = image.info.resources.layers,
-            },
-        .imageOffset = {0, 0, 0},
-        .imageExtent = {image.info.size.width, image.info.size.height, image.info.size.depth},
-    };
-    runtime.DownloadImage(&image, download.buffer, std::span{&image_download, 1});
+    const auto guest_download = RecordGuestLayoutDownload(image, !sync);
+    const auto download = guest_download.first;
+    const u32 download_size = guest_download.second;
     if (sync) {
         scheduler.Finish();
         download.Invalidate();
