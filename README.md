@@ -15,7 +15,7 @@
 The launcher has a built-in updater that can be toggled on/off in Advanced.
 
 - If opening the launcher itself, available updates show in the sidebar.
-- If launching through Steam or Game Mode (Steam Deck), the update downloads in the background and is used the next time you start the game.
+- If launching through Steam or Game Mode (Steam Deck), the update prompt is shown and can be navigated with controller
 
 ## Steam Deck
 - Install the [AppImage](https://github.com/spacepepperoni/medievil_ps4_Linux/releases/latest/download/MediEvil-x86_64.AppImage), open it once in Desktop Mode and choose your game folder, then press **Advanced → Add to Steam** to play in Game Mode.
@@ -23,7 +23,7 @@ The launcher has a built-in updater that can be toggled on/off in Advanced.
 
 ## Files needed
 
-You must have your own copy of MediEvil (PS4, CUSA11227 or the European CUSA12982), .pkg is also supported.
+You must have your own copy of MediEvil (.pkg is also supported).
 
 Point the launcher to it in the Game tab. Then Play, Add to Steam (recommended for Steam Deck) or create a Desktop shortcut.
 
