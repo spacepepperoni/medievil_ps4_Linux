@@ -234,7 +234,17 @@ void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_
     display = display && targets.size() == 1;
     const bool new_pass = !(pass_open && !entries.empty() && !entries.back().compute &&
                             entries.back().colors == targets);
+    // Linux fork: MediEvil draws into one display buffer several times a frame (the frame, then
+    // the HUD piece by piece); ending at the next of those recorded only the HUD. A recording ends
+    // at a pass into the other display buffer: the next frame, scene passes and all in between.
+    static VAddr recording_display = 0;
+    const VAddr display_address = display ? colors[0]->guest_address : 0;
+    if (display && new_pass && state.load(std::memory_order_relaxed) == Recording &&
+        display_address == recording_display) {
+        display = false;
+    }
     if (display && new_pass) {
+        recording_display = display_address;
         if (state.load(std::memory_order_relaxed) == Recording) {
             Write(last_presented.load(std::memory_order_relaxed));
             entries.clear();
