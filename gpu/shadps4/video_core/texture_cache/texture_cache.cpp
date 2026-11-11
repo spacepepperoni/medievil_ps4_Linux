@@ -1425,7 +1425,13 @@ void TextureCache::RegisterImage(ImageId image_id) {
     AliasState* state{};
     u32 aliases{};
     bool inserted{};
-    ForEachAlias(image, [&](ImageId candidate_id, Image& candidate) {
+    // Linux fork (diagnostic): GOW3_IMAGE_ALIASES=0 registers no aliases (images at one address are
+    // not kept in step), to see whether alias copies take part in per-load lighting errors.
+    static const bool aliases_on = [] {
+        const char* value = std::getenv("GOW3_IMAGE_ALIASES");
+        return !value || value[0] != '0';
+    }();
+    if (aliases_on) ForEachAlias(image, [&](ImageId candidate_id, Image& candidate) {
         if (!state) {
             auto result = alias_states.try_emplace(image.info.guest_address);
             state = std::addressof(result.first.value());
