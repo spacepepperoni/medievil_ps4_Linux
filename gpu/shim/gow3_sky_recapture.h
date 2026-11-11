@@ -22,7 +22,6 @@
 
 extern "C" {
 unsigned char* runtime_image_base(void);
-int runtime_memory_write_backing(uintptr_t address, const void* data, uint64_t size);
 }
 
 namespace Gow3SkyRecapture {
@@ -57,10 +56,18 @@ inline bool SetEveryFrame(int32_t value) {
     unsigned char* image = runtime_image_base();
     const uintptr_t slot = Slot();
     if (!image || !slot) {
+        static bool told = false;
+        if (!told) {
+            told = true;
+            std::printf("Sky light: no game image (%p) or variable (%#llx); no recapture\n",
+                        static_cast<void*>(image), static_cast<unsigned long long>(slot));
+        }
         return false;
     }
-    return runtime_memory_write_backing(reinterpret_cast<uintptr_t>(image + slot), &value,
-                                        sizeof(value)) != 0;
+    // The eboot's own data (not guest heap memory, which goes through the backing view), as
+    // runtime_extra.c reads r.SetRes: a plain store the game thread reads at its next frame.
+    __atomic_store_n(reinterpret_cast<int32_t*>(image + slot), value, __ATOMIC_RELEASE);
+    return true;
 }
 
 /// The GPU thread binds a 9x1 RGBA16F render target: the game is capturing the sky light.
