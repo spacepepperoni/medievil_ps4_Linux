@@ -61,6 +61,44 @@ def setres_slot(elf_path):
     return None
 
 
+# r.SkylightUpdateEveryFrame (gow3_sky_recapture.h): a reference console variable, registered with
+# `lea rdx, [rip+value]` right before `lea rsi, [rip+name]`; the engine reads the int at value.
+SKYLIGHT_NAME = 'r.SkylightUpdateEveryFrame'.encode('utf-16-le') + bytes(2)
+
+
+def _elf_segments(elf):
+    phoff, = struct.unpack_from('<Q', elf, 0x20)
+    entry_size, count = struct.unpack_from('<HH', elf, 0x36)
+    for i in range(count):
+        kind, _, file_offset, vaddr, _, file_size, _, _ = struct.unpack_from('<IIQQQQQQ', elf, phoff + i * entry_size)
+        if kind == 1:
+            yield file_offset, vaddr, file_size
+
+
+def skylight_slot(elf_path):
+    """Image offset of the int r.SkylightUpdateEveryFrame reads; None unless found exactly once."""
+    elf = Path(elf_path).read_bytes()
+    segments = list(_elf_segments(elf))
+
+    def vaddr_of(offset):
+        return next((offset - fo + va for fo, va, size in segments if fo <= offset < fo + size), None)
+
+    names = [vaddr_of(m.start()) for m in re.finditer(re.escape(SKYLIGHT_NAME), elf)]
+    if len(names) != 1 or names[0] is None:
+        return None
+    hits = []
+    for m in re.finditer(re.escape(bytes.fromhex('488d15')) + b'(....)' + re.escape(bytes.fromhex('488d35')) + b'(....)',
+                         elf, re.S):
+        at = vaddr_of(m.start())
+        if at is None:
+            continue
+        value_rel, = struct.unpack('<i', m.group(1))
+        name_rel, = struct.unpack('<i', m.group(2))
+        if at + 14 + name_rel == names[0]:
+            hits.append(at + 7 + value_rel)
+    return hits[0] if len(hits) == 1 else None
+
+
 def paks_dir(game):
     return Path(game) / 'overbite' / 'content' / 'paks'
 

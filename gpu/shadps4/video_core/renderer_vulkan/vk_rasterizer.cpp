@@ -19,6 +19,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "gow3_sky_recapture.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "gow3_threads.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
@@ -3822,6 +3823,7 @@ void Rasterizer::NoteFrameStart() {
         profiler->BeginFrame();
     }
     const u64 frame = Gow3Stats::gpu_frames.fetch_add(1, std::memory_order_relaxed) + 1;
+    Gow3SkyRecapture::OnFrame(frame);
     // GOW3_BUFFER_STATS=1: how many earlier frames the GPU has not finished when the GPU thread
     // starts a frame — the lag that decides whether guest memory can be read in place.
     static const bool stats = [] {

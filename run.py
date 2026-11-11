@@ -196,6 +196,13 @@ def main():
             # switches (runtime_extra.c).
             import ue4_override
             slot = ue4_override.setres_slot(out / 'eboot.elf')
+            # Where this eboot keeps r.SkylightUpdateEveryFrame's value, for the sky light's
+            # recapture after a level load (gpu/shim/gow3_sky_recapture.h).
+            sky = ue4_override.skylight_slot(out / 'eboot.elf')
+            if sky:
+                env['GOW3_UE4_SKYLIGHT_CVAR'] = hex(sky)
+            else:
+                print('Sky light: r.SkylightUpdateEveryFrame not found in this game build; no recapture', flush=True)
             if slot:
                 env['GOW3_UE4_SETRES_CVAR'] = hex(slot)
             elif env.get('GOW3_UE4_SETRES'):

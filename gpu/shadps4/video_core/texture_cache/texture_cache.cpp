@@ -26,6 +26,7 @@
 #include "video_core/texture_cache/aliasing.h"
 #include "video_core/texture_cache/host_compatibility.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include "gow3_sky_recapture.h"
 #include <unordered_map>
 #include "video_core/texture_cache/tile_manager.h"
 
@@ -112,6 +113,7 @@ void TextureCache::RetireReadbacks() {
                     }
                     std::printf("\n");
                 }
+                Gow3SkyRecapture::CheckResult(entry.address, entry.payload.mapped, entry.size);
                 Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(entry.address),
                     entry.payload.mapped, entry.size);
                 if (entry.watched) WatchReadback<false>(entry.address, entry.size);
@@ -228,6 +230,7 @@ void TextureCache::ProcessDownloadImages() {
                 if (!pending_readbacks.CanFit(copy->size)) {
                     scheduler.Finish();
                     copy->staging.Invalidate();
+                    Gow3SkyRecapture::CheckResult(copy->guest_address, copy->staging.mapped, copy->size);
                     Core::Memory::Instance()->TryWriteBacking(
                         std::bit_cast<u8*>(copy->guest_address), copy->staging.mapped, copy->size);
                     runtime.GetStagingPool().FreeDeferred(copy->staging);
@@ -300,6 +303,7 @@ void TextureCache::ProcessDownloadImages() {
     scheduler.Finish();
     for (const PendingDownload& download : pending) {
         download.staging.Invalidate();
+        Gow3SkyRecapture::CheckResult(download.guest_address, download.staging.mapped, download.size);
         Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(download.guest_address),
                                                   download.staging.mapped, download.size);
         runtime.GetStagingPool().FreeDeferred(download.staging);
@@ -366,12 +370,14 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
     if (sync) {
         scheduler.Finish();
         download.Invalidate();
+        Gow3SkyRecapture::CheckResult(image.info.guest_address, download.mapped, download_size);
         Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(image.info.guest_address),
                                                   download.mapped, download_size);
     } else {
         scheduler.DeferPriorityOperation(
             [this, device_addr = image.info.guest_address, download, download_size] {
                 download.Invalidate();
+                Gow3SkyRecapture::CheckResult(device_addr, download.mapped, download_size);
                 Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(device_addr),
                                                           download.mapped, download_size);
                 runtime.GetStagingPool().FreeDeferred(download);
@@ -1164,6 +1170,11 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
     if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= readback_max_width)) {
         std::unique_lock lk{download_images_mutex};
         download_images.emplace(image_id);
+    }
+    // Linux fork: a 9x1 RGBA16F target is the sky light's capture result (gow3_sky_recapture.h).
+    if (image.info.size.width == 9 && image.info.size.height == 1 &&
+        image.info.pixel_format == vk::Format::eR16G16B16A16Sfloat) {
+        Gow3SkyRecapture::OnCaptureTarget(image.info.guest_address);
     }
     // Linux fork: which small targets the game renders to, tiled or not (lighting diag).
     if (image.info.size.width <= 64 && image.info.size.height <= 2) {
