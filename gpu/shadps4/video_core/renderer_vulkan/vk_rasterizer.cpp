@@ -3822,6 +3822,15 @@ void Rasterizer::NoteFrameStart() {
         profiler->BeginFrame();
     }
     const u64 frame = Gow3Stats::gpu_frames.fetch_add(1, std::memory_order_relaxed) + 1;
+    // Linux fork (diagnostic): GOW3_REUPLOAD_TRIGGER names a file; when it appears, all buffer
+    // data is read again from guest memory (stale GPU copies vs wrong data in RAM).
+    static const char* reupload_trigger = std::getenv("GOW3_REUPLOAD_TRIGGER");
+    if (reupload_trigger && frame % 15 == 0 && std::remove(reupload_trigger) == 0) {
+        const size_t arenas = buffer_cache.MarkAllCpuModified();
+        std::printf("Reupload: %zu buffer arenas marked CPU-modified at GPU frame %llu\n", arenas,
+                    static_cast<unsigned long long>(frame));
+        std::fflush(stdout);
+    }
     // GOW3_BUFFER_STATS=1: how many earlier frames the GPU has not finished when the GPU thread
     // starts a frame — the lag that decides whether guest memory can be read in place.
     static const bool stats = [] {

@@ -87,6 +87,9 @@ public:
 
     /// Invalidates any buffer in the logical page range.
     void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false);
+    /// Linux fork (diagnostic): every arena's range is marked CPU-modified, so all buffer data is
+    /// read again from guest memory when next used. Returns the number of arenas.
+    size_t MarkAllCpuModified();
 
     /// gow3: a guest write fault at `device_addr` was handled; unprotect its neighbourhood.
     void ExtendWriteFault(VAddr device_addr);

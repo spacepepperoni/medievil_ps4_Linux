@@ -139,6 +139,13 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
 
 BufferCache::~BufferCache() = default;
 
+size_t BufferCache::MarkAllCpuModified() {
+    for (const Buffer& arena : arenas) {
+        memory_tracker->MarkRegionAsCpuModified(arena.CpuAddr(), arena.SizeBytes());
+    }
+    return arenas.size();
+}
+
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
     memory_tracker->InvalidateRegion(device_addr, size, [this, device_addr, size, assume_locks] {
         ReadMemory(device_addr, size, true, assume_locks);
