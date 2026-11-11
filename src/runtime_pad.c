@@ -103,6 +103,13 @@ static void report_unmapped_joysticks(void) {
  * them are read: with only the first one, a second device listed before the pad in use (a
  * virtual pad, a wheel, a receiver) left that pad unread (issue #25). */
 static int current_gamepads(void) {
+    if (!sdl_ready) { /* hotplug hints, as in gpu/shim/window.cpp (whichever starts SDL first) */
+        SDL_SetHint(SDL_HINT_JOYSTICK_THREAD,"1");
+        if (!access("/run/.containerenv",F_OK) || !access("/.dockerenv",F_OK)) {
+            SDL_SetHint("SDL_JOYSTICK_DISABLE_UDEV","1");
+            SDL_SetHint(SDL_HINT_HIDAPI_UDEV,"0");
+        }
+    }
     if (!sdl_ready) sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
     if (sdl_ready<0) return 0;
     int open=0;

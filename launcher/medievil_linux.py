@@ -539,13 +539,13 @@ DECK_FPS = [('30', ('30 (recommended)',)), ('60', ('60',))]
 DECK_SETTINGS = {
     'display_mode': 'fullscreen',         # gamescope (Game Mode) scales the window to the screen
     'engine_fps': '60',                   # the Deck frame rate (30/60) is the limit below it
-    'ue4_upscale': 'off',                 # the 720p scene is already the Deck's scale
     'fsr1': '0',
-    # The 3D scene at 720p inside the game's 1080p output (gamescope scales that to the screen).
-    # 720p_native (the whole output at 1280x720) showed the 1080p loading screens and movies
-    # cropped, zoomed in with illegible text; at 30 FPS the Deck holds 720p the same.
-    'render_resolution': '720p',
-    'ue4_quality': 'low',                 # upstream's setting for integrated graphics
+    # The 3D scene at 67% (720p) inside the game's 1080p output (gamescope scales that to the
+    # screen). A 1280x720 output showed the 1080p loading screens and movies cropped, zoomed in
+    # with illegible text; at 30 FPS the Deck holds 720p the same.
+    'output_resolution': '1920x1080',
+    'render_scale': '67',
+    'ue4_quality': 'deck',                # upstream's Steam Deck graphics level (1.4.0)
     'vsync': '1',
 }
 DECK_LOCKED = (*DECK_SETTINGS, 'fps_limit')
@@ -582,12 +582,20 @@ def deck_updates(settings, ini_path):
         settings['deck_locks2'] = changed = True
         if settings.get('deck_mode'):
             graphics_options.write_keys(ini_path, {key: DECK_SETTINGS[key]
-                                                   for key in ('engine_fps', 'ue4_upscale', 'fsr1')})
+                                                   for key in ('engine_fps', 'fsr1')})
     if not settings.get('deck_720p'):
         settings['deck_720p'] = changed = True
         if settings.get('deck_mode') and \
                 graphics_options.read_ini(ini_path).get('render_resolution') == '720p_native':
             graphics_options.write_keys(ini_path, {'render_resolution': '720p'})
+    if not settings.get('deck_v14'):
+        # 1.4.0's graphics model: output resolution and render scale in place of render_resolution,
+        # and upstream's Steam Deck level ("deck") with every graphics setting following it.
+        settings['deck_v14'] = changed = True
+        if settings.get('deck_mode'):
+            keys = {key: DECK_SETTINGS[key] for key in ('output_resolution', 'render_scale', 'ue4_quality')}
+            keys.update(graphics_options.level_choices(graphics_options.DECK_LEVEL))
+            graphics_options.write_keys(ini_path, keys)
     return changed
 
 
@@ -630,7 +638,10 @@ def steam_os():
 
 
 def deck_values(launcher):
-    return {**DECK_SETTINGS, 'fps_limit': launcher.var('deck_fps', 'app').get()}
+    import graphics_options
+    # 1.4.0: every graphics setting at upstream's Steam Deck level as well.
+    return {**DECK_SETTINGS, 'fps_limit': launcher.var('deck_fps', 'app').get(),
+            **graphics_options.level_choices(graphics_options.DECK_LEVEL)}
 
 
 def set_var(launcher, key, value, ini_flags):
@@ -692,8 +703,9 @@ def deck_switch(launcher, ini_flags):
             if hasattr(launcher, 'pad_style'):
                 launcher.pad_style.set('steamdeck')
                 launcher.relabel_pad_controls()
-        launcher.app['deck_saved'] = {key: get_var(launcher, key, ini_flags) for key in DECK_LOCKED}
-        for key, value in deck_values(launcher).items():
+        values = deck_values(launcher)
+        launcher.app['deck_saved'] = {key: get_var(launcher, key, ini_flags) for key in values}
+        for key, value in values.items():
             set_var(launcher, key, value, ini_flags)
     else:
         for key, value in (launcher.app.pop('deck_saved', None) or {}).items():
