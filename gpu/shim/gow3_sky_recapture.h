@@ -10,9 +10,8 @@
 // every value NaN in the bad loads, finite ones with r.SkylightUpdateEveryFrame=1).
 //
 // So when the 9x1 result comes back to the game's memory with a NaN or infinite value, the port
-// writes 0 in its place (the next capture is lit without it) and turns r.SkylightUpdateEveryFrame
-// on until a finite result comes back (at most kMaxFrames), then off: a good load costs nothing,
-// a bad one a few recaptures. r.SkylightUpdateEveryFrame is a reference console variable, a plain
+// turns r.SkylightUpdateEveryFrame on until a finite result comes back (at most kMaxFrames, then
+// kCooldownFrames without), then off: a good load costs nothing, a bad one a few recaptures. r.SkylightUpdateEveryFrame is a reference console variable, a plain
 // int in the game's data, which run.py finds in each eboot (ue4_override.skylight_slot) and passes
 // as GOW3_UE4_SKYLIGHT_CVAR. GOW3_SKY_RECAPTURE=0 turns this off (the result is left as it is).
 #pragma once
@@ -49,12 +48,14 @@ inline uintptr_t Slot() {
     return slot;
 }
 
-inline constexpr uint64_t kMaxFrames = 60; ///< longest recapture run for one bad result
+inline constexpr uint64_t kMaxFrames = 150; ///< longest recapture run for one bad result
+inline constexpr uint64_t kCooldownFrames = 300; ///< after giving up, NaN results are left alone
 
 inline std::mutex targets_mutex;
 inline std::set<uint64_t> targets;              ///< guest addresses of the sky's 9x1 results
 inline std::atomic<uint64_t> current_frame{0};
 inline std::atomic<uint64_t> recapture_until{0}; ///< recapturing until this GPU frame (0: not)
+inline std::atomic<uint64_t> cooldown_until{0};  ///< no new recapture run before this frame
 inline std::atomic<uint64_t> bad_results{0}, fixed_results{0};
 
 inline void SetEveryFrame(int32_t value) {
@@ -99,21 +100,21 @@ inline bool CheckResult(uint64_t address, void* data, uint64_t size, uint32_t pi
     auto* halves = static_cast<uint16_t*>(data);
     bool bad = false;
     for (uint32_t i = 0; i < pixels * 4; ++i) {
-        if ((halves[i] & 0x7c00) == 0x7c00) { // exponent all ones: infinite or NaN
-            halves[i] = 0;
-            bad = true;
-        }
+        // Exponent all ones: infinite or NaN. Left as it is: UE4 divides by the sky light's
+        // brightness, so a 0 in its place made every later capture NaN as well (pyro).
+        bad |= (halves[i] & 0x7c00) == 0x7c00;
     }
     const uint64_t frame = current_frame.load(std::memory_order_relaxed);
     if (bad) {
         const uint64_t count = ++bad_results;
-        if (!recapture_until.load(std::memory_order_relaxed)) {
+        if (!recapture_until.load(std::memory_order_relaxed) &&
+            frame >= cooldown_until.load(std::memory_order_relaxed)) {
             SetEveryFrame(1);
             recapture_until.store(frame + kMaxFrames, std::memory_order_relaxed);
         }
         if (count <= 20 || count % 100 == 0) {
             std::printf("Sky light: capture result %#llx had NaN or infinite values (%llu so far); "
-                        "cleared, capturing again\n",
+                        "capturing again\n",
                         static_cast<unsigned long long>(address),
                         static_cast<unsigned long long>(count));
         }
@@ -138,6 +139,7 @@ inline void OnFrame(uint64_t frame) {
     if (until && frame >= until) {
         SetEveryFrame(0);
         recapture_until.store(0, std::memory_order_relaxed);
+        cooldown_until.store(frame + kCooldownFrames, std::memory_order_relaxed);
         std::printf("Sky light: still NaN after %llu frames of recaptures; stopped\n",
                     static_cast<unsigned long long>(kMaxFrames));
     }
