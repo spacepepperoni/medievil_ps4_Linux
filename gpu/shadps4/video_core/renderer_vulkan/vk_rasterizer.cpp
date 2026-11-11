@@ -3831,6 +3831,14 @@ void Rasterizer::NoteFrameStart() {
                     static_cast<unsigned long long>(frame));
         std::fflush(stdout);
     }
+    // GOW3_RETEXTURE_TRIGGER: the same for textures read from guest memory (not render targets).
+    static const char* retexture_trigger = std::getenv("GOW3_RETEXTURE_TRIGGER");
+    if (retexture_trigger && frame % 15 == 0 && std::remove(retexture_trigger) == 0) {
+        const size_t images = texture_cache.MarkGuestImagesDirty();
+        std::printf("Retexture: %zu guest images marked CPU-dirty at GPU frame %llu\n", images,
+                    static_cast<unsigned long long>(frame));
+        std::fflush(stdout);
+    }
     // GOW3_BUFFER_STATS=1: how many earlier frames the GPU has not finished when the GPU thread
     // starts a frame — the lag that decides whether guest memory can be read in place.
     static const bool stats = [] {

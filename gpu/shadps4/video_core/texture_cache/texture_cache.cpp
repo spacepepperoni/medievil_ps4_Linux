@@ -553,6 +553,19 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
     });
 }
 
+size_t TextureCache::MarkGuestImagesDirty() {
+    std::scoped_lock lock{mutex};
+    size_t count = 0;
+    for (Image& image : slot_images) {
+        if (image.info.guest_address == 0 || True(image.flags & ImageFlagBits::GpuModified)) {
+            continue;
+        }
+        image.flags |= ImageFlagBits::CpuDirty;
+        ++count;
+    }
+    return count;
+}
+
 void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
     // Partial buffer writes still need the image's untouched bytes in guest memory.
     ResolveReadbacks(address, max_size, true, ReadbackSource::GpuPartialWrite);

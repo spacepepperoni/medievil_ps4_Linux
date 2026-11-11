@@ -116,6 +116,9 @@ public:
 
     /// Marks an image as dirty if it exists at the provided address.
     void InvalidateMemoryFromGPU(VAddr address, size_t max_size);
+    /// Linux fork (diagnostic): images the GPU never drew into (textures from guest memory) are marked
+    /// CPU-dirty, so each is uploaded again from guest memory when next used. Returns how many.
+    size_t MarkGuestImagesDirty();
 
     /// Evicts any images that overlap the unmapped range.
     void UnmapMemory(VAddr cpu_addr, size_t size);
