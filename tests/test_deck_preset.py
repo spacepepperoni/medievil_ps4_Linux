@@ -25,7 +25,7 @@ class DeckPresetTest(unittest.TestCase):
             'perf_ring_reuse': '1', 'present_inline': '1', 'present_precise_tick': '0', 'present_frame_trace': '0',
             'present_no_frame_caps': '1', 'present_tick_hz': '900', 'present_mode': 'auto',
             'present_limiter': 'standard', 'display_vrr': '0', 'shadow_resolution': '256', 'shadow_distance': 'short',
-            'shadow_quality': '1', 'view_distance': '0.7', 'lod_distance': 'low', 'ambient_occlusion': '2',
+            'shadow_quality': '1', 'view_distance': '1', 'lod_distance': 'low', 'ambient_occlusion': '2',
             'reflections': '1', 'volumetric_fog': '0', 'motion_blur': '0', 'depth_of_field': '0', 'bloom': '2',
             'lens_flares': '0', 'chromatic_aberration': '0', 'preshadows': '0',
             # Settings only Low quality changed before 2026-11-08 (now in the list): Low's values.
