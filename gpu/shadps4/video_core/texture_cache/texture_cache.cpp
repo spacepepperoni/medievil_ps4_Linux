@@ -26,6 +26,7 @@
 #include "video_core/texture_cache/aliasing.h"
 #include "video_core/texture_cache/host_compatibility.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include "gow3_sky_recapture.h"
 #include <unordered_map>
 #include "video_core/texture_cache/tile_manager.h"
 
@@ -1164,6 +1165,11 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
     if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= readback_max_width)) {
         std::unique_lock lk{download_images_mutex};
         download_images.emplace(image_id);
+    }
+    // Linux fork: a 9x1 RGBA16F target is the sky light's capture result (gow3_sky_recapture.h).
+    if (image.info.size.width == 9 && image.info.size.height == 1 &&
+        image.info.pixel_format == vk::Format::eR16G16B16A16Sfloat) {
+        Gow3SkyRecapture::OnCaptureTarget();
     }
     // Linux fork: which small targets the game renders to, tiled or not (lighting diag).
     if (image.info.size.width <= 64 && image.info.size.height <= 2) {
