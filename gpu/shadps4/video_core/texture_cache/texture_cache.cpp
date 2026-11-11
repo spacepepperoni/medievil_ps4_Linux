@@ -1923,7 +1923,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc, Vi
                                                           range.extent.levels, range.base.layer,
                                                           range.extent.layers));
         }
-        if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8 ||
+        if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= readback_max_width ||
                                        (tiny_target_readback && IsTinyTarget(image.info))) &&
             image.info.guest_address != 0) {
             std::unique_lock lk{download_images_mutex};
@@ -1964,7 +1964,7 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
     DiscardUndefinedContents(image_id);
     Image& image = slot_images[image_id];
     image.flags |= ImageFlagBits::GpuModified;
-    if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8 ||
+    if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= readback_max_width ||
                                    (tiny_target_readback && IsTinyTarget(image.info)))) {
         std::unique_lock lk{download_images_mutex};
         download_images.emplace(image_id);

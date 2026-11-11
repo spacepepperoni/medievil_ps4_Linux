@@ -583,6 +583,15 @@ private:
         const char* value = std::getenv("GOW3_READBACK_FIRST_WAIT");
         return !(value && value[0] == '0');
     }();
+    /// Linux fork: tiled images up to this width also go back to RAM (upstream: 8). 9 takes in UE4's
+    /// sky light result (9x1 RGBA16F, read by the game once per level): without it the game read
+    /// leftover memory on the Steam Deck and Inside the Asylum was lit in random colours per start
+    /// (fixed in v1.3.8-linux.99, lost again with upstream's rule in the 1.4.0 merge).
+    /// GOW3_READBACK_MAX_WIDTH=8: upstream's rule.
+    const u32 readback_max_width = [] {
+        const char* value = std::getenv("GOW3_READBACK_MAX_WIDTH");
+        return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 9u;
+    }();
     /// gow3 GOW3_TINY_TARGET_READBACK=1: tiny color targets and storage images (at most 64
     /// texels) are copied back to guest memory in their tiled layout too (texture_cache.cpp
     /// IsTinyTarget). Off by default: it copies many small per-frame targets back every frame
