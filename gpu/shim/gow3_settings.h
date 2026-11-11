@@ -270,7 +270,7 @@ inline constexpr UE4LiveOption UE4LiveOptions[] = {
      {"Near", "Medium", "Normal (PS4 default)", "Far", "Farthest"},
      {"0.7", "0.85", "1", "1.5", "2"},
      {{"0.7"}, {"0.85"}, {"1"}, {"1.5"}, {"2"}},
-     {"2", "1.5", "1", "0.85", "0.7", "0.7"}},
+     {"2", "1.5", "1", "0.85", "0.7", "1"}}, // Linux fork: Deck at full view distance
     {"lod_distance", "Level of detail",
      "When models and foliage switch to their simpler versions. Higher: detailed models further "
      "away, more triangles.",

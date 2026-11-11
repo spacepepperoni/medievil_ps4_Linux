@@ -310,7 +310,9 @@ GRAPHICS_SETTINGS = [
      True, ('r.ViewDistanceScale',),
      [('0.7', 'Near', ('0.7',)), ('0.85', 'Medium', ('0.85',)), ('1', 'Normal (PS4 default)', ('1',)),
       ('1.5', 'Far', ('1.5',)), ('2', 'Farthest', ('2',))],
-     {'ultra': '2', 'high': '1.5', 'console': '1', 'medium': '0.85', 'low': '0.7', 'deck': '0.7'}),
+     # Linux fork: the Steam Deck at the full view distance: nearer, props with their own draw distance
+     # (walls, barrels) vanished under MediEvil's high top-down camera (the Sleeping Village).
+     {'ultra': '2', 'high': '1.5', 'console': '1', 'medium': '0.85', 'low': '0.7', 'deck': '1'}),
     ('lod_distance', 'Level of detail',
      'When models and foliage switch to their simpler versions. Higher: detailed models further away, more '
      'triangles.', True, ('r.StaticMeshLODDistanceScale', 'foliage.LODDistanceScale'),
