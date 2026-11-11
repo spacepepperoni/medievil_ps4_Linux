@@ -119,6 +119,8 @@ public:
     /// Linux fork (diagnostic): images the GPU never drew into (textures from guest memory) are marked
     /// CPU-dirty, so each is uploaded again from guest memory when next used. Returns how many.
     size_t MarkGuestImagesDirty();
+    /// Linux fork (diagnostic, GOW3_FILL_LOG=1): logs the cached images a GPU fill or copy lands on.
+    void LogImagesInRange(const char* what, VAddr address, u64 size, u32 value);
 
     /// Evicts any images that overlap the unmapped range.
     void UnmapMemory(VAddr cpu_addr, size_t size);

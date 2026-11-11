@@ -553,6 +553,34 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
     });
 }
 
+void TextureCache::LogImagesInRange(const char* what, VAddr address, u64 size, u32 value) {
+    static const bool enabled = [] {
+        const char* v = std::getenv("GOW3_FILL_LOG");
+        return v && v[0] == '1';
+    }();
+    static int logged = 0;
+    if (!enabled || logged >= 400) {
+        return;
+    }
+    std::scoped_lock lock{mutex};
+    ForEachImageInRegion(address, size, [&](ImageId, Image& image) {
+        if (!image.Overlaps(address, size) || logged >= 400) {
+            return;
+        }
+        ++logged;
+        std::printf("Fill log: %s %#llx+%#llx value %#x over image %#llx+%#llx %s %ux%u layers %u "
+                    "mips %u%s%s\n",
+                    what, static_cast<unsigned long long>(address),
+                    static_cast<unsigned long long>(size), value,
+                    static_cast<unsigned long long>(image.info.guest_address),
+                    static_cast<unsigned long long>(image.info.guest_size),
+                    vk::to_string(image.info.pixel_format).c_str(), image.info.size.width,
+                    image.info.size.height, image.info.resources.layers, image.info.resources.levels,
+                    image.info.guest_address == address ? " (same base)" : " (inside)",
+                    True(image.flags & ImageFlagBits::GpuModified) ? " gpu-modified" : "");
+    });
+}
+
 size_t TextureCache::MarkGuestImagesDirty() {
     std::scoped_lock lock{mutex};
     size_t count = 0;
