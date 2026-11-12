@@ -285,6 +285,23 @@ void TextureCache::RetireReadbacks(bool polled) {
         [this](auto& entry) {
             if (entry.valid) {
                 entry.payload.Invalidate();
+                {
+                    // Linux fork (diagnostic, GOW3_SKY_LOG=1): the 1024-byte copies (9x1 and 1x1
+                    // RGBA16F at pitch 128: the sky light's lighting and brightness) as half floats.
+                    static const bool sky_log = [] {
+                        const char* v = std::getenv("GOW3_SKY_LOG");
+                        return v && v[0] == '1';
+                    }();
+                    static std::unordered_map<u64, u32> logged;
+                    if (sky_log && entry.size == 1024 && logged[entry.address]++ < 6) {
+                        const auto* h = reinterpret_cast<const u16*>(entry.payload.mapped);
+                        std::printf("Sky log %#llx:", static_cast<unsigned long long>(entry.address));
+                        for (u32 i = 0; i < 36; ++i) {
+                            std::printf(" %.4g", HalfToFloat(h[i]));
+                        }
+                        std::printf("\n");
+                    }
+                }
                 Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(entry.address),
                     entry.payload.mapped, entry.size);
                 if (entry.watched) UnwatchReadback(entry);
