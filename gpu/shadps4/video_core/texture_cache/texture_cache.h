@@ -480,6 +480,9 @@ private:
     bool Watched(const ImageInfo& info) const;
     void WatchNote(const Image& image, const char* event, const std::string& detail = {});
 
+    /// Linux fork: copies a separately rendered mip image into its parent (texture_cache.cpp).
+    bool MergeRenderedMip(Image& sub, Image& parent, s32 mip, s32 slice);
+
     void FreeImage(ImageId image_id, u32 line = __builtin_LINE()) {
         const auto& image = slot_images[image_id];
         if (image_stats) {
