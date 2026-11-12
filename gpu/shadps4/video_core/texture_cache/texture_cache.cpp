@@ -1314,6 +1314,44 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
     return cache_image_id;
 }
 
+// Linux fork: a separately rendered image that is one mip (and slice range) of `parent` is copied
+// into it. UE4 renders a cube's mips as targets of their own before it first uses the whole mipped
+// cube; where that data was dropped, the first pass of the sky light's lighting read garbage
+// (its first coefficient: MediEvil lit in one blown-out colour, at random per level load).
+// GOW3_MERGE_RENDERED_MIPS=0: off.
+bool TextureCache::MergeRenderedMip(Image& sub, Image& parent, s32 mip, s32 slice) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_MERGE_RENDERED_MIPS");
+        return !(env && env[0] == '0');
+    }();
+    if (!enabled || mip < 0 || slice < 0 || False(sub.flags & ImageFlagBits::GpuModified) ||
+        sub.info.pixel_format != parent.info.pixel_format ||
+        sub.info.props.is_block != parent.info.props.is_block ||
+        sub.info.num_samples != parent.info.num_samples ||
+        u32(mip) >= parent.info.resources.levels ||
+        u32(slice) + sub.info.resources.layers > parent.info.resources.layers ||
+        sub.info.size.depth != 1) {
+        return false;
+    }
+    const u32 dim = parent.info.props.is_block ? 2 : 0;
+    if (std::max(parent.info.size.width >> (mip + dim), 1u) != (sub.info.size.width >> dim) ||
+        std::max(parent.info.size.height >> (mip + dim), 1u) != (sub.info.size.height >> dim) ||
+        std::max(parent.info.mips_layout[mip].pitch >> dim, 1u) != (sub.info.pitch >> dim)) {
+        return false;
+    }
+    runtime.CopyMip(&sub, &parent, mip, slice);
+    static int logged = 0;
+    if (logged < 40) {
+        ++logged;
+        std::printf("Rendered mip merged: %#llx %ux%u layers %u -> %#llx mip %d slice %d (%s)\n",
+                    static_cast<unsigned long long>(sub.info.guest_address), sub.info.size.width,
+                    sub.info.size.height, sub.info.resources.layers,
+                    static_cast<unsigned long long>(parent.info.guest_address), mip, slice,
+                    vk::to_string(parent.info.pixel_format).c_str());
+    }
+    return true;
+}
+
 std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& image_info,
                                                            BindingType binding,
                                                            ImageId cache_image_id,
@@ -1549,6 +1587,8 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
                     cache_image.binding.needs_rebind = 1u;
                     if (merged_image_id) {
                         GetImage(merged_image_id).binding.is_target = 1u;
+                        // Linux fork: its contents go with it (they were dropped here).
+                        MergeRenderedMip(cache_image, slot_images[merged_image_id], mip, slice);
                     }
 
                     FreeImage(cache_image_id);
@@ -1817,6 +1857,38 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
             if (!unmapped) {
                 CACHE_STAT(gpu_freed_reused, 1);
                 CACHE_STAT(gpu_freed_reused_bytes, info.guest_size);
+            }
+        }
+        // Linux fork: images rendered before this one existed that are mips of it (the overlap
+        // pass above had no image to copy them into yet) are merged in now.
+        bool merged_any = false;
+        for (const ImageId cache_id : image_ids) {
+            if (cache_id == image_id || !slot_images.is_allocated(cache_id)) {
+                continue;
+            }
+            Image& sub = slot_images[cache_id];
+            Image& created = slot_images[image_id];
+            if (False(sub.flags & ImageFlagBits::Registered) ||
+                sub.info.guest_address <= created.info.guest_address) {
+                continue;
+            }
+            const s32 mip = sub.info.MipOf(created.info);
+            const s32 slice = mip >= 0 ? sub.info.SliceOf(created.info, mip) : -1;
+            if (mip < 0 || slice < 0 || False(sub.flags & ImageFlagBits::GpuModified)) {
+                continue;
+            }
+            if (!merged_any) {
+                // The new image's own contents first (as ExpandImage does), then the mips over them.
+                created.flags &= ~ImageFlagBits::Undefined;
+                RefreshImage(created);
+                merged_any = true;
+            }
+            if (MergeRenderedMip(sub, created, mip, slice)) {
+                if (sub.binding.is_target) {
+                    sub.binding.needs_rebind = 1u;
+                    created.binding.is_target = 1u;
+                }
+                FreeImage(cache_id);
             }
         }
     }
