@@ -999,6 +999,12 @@ ImageWatchSpec& ImageWatch() {
 
 bool TextureCache::Watched(const ImageInfo& info) const {
     const auto& spec = ImageWatch();
+    if (spec.width == 0 && spec.height == 0) {
+        // GOW3_IMAGE_WATCH=0x0:6: every image of at most 64x64 with at least that many layers
+        // (a cube and the separate images of its mips).
+        return spec.min_layers != 0 && info.size.width <= 64 && info.size.height <= 64 &&
+               info.resources.layers >= spec.min_layers;
+    }
     return spec.width != 0 && info.size.width == spec.width && info.size.height == spec.height &&
            info.resources.layers >= spec.min_layers;
 }
