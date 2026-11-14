@@ -10,6 +10,8 @@
 #include <mutex>
 #include <unordered_set>
 #include <xxhash.h>
+#include <chrono>
+#include <thread>
 #include "video_core/amdgpu/liverpool.h"
 
 #include "gow3_sections.h"
@@ -1217,6 +1219,7 @@ void TextureCache::ImageHashTick() {
         return;
     }
     ++next;
+    const auto hash_begin = std::chrono::steady_clock::now();
     std::printf("Image hashes %.3f s tick %llu\n", seconds,
                 static_cast<unsigned long long>(scheduler.CurrentTick()));
     constexpr u64 MaxMipBytes = 48ull << 20;
@@ -1290,6 +1293,50 @@ void TextureCache::ImageHashTick() {
                     info.resources.levels, info.resources.layers, gpu ? " gpu" : "",
                     dirty ? " dirty" : "", host.c_str(), guest.c_str(), stale.c_str());
     }
+    std::printf("Image hashes took %.1f ms\n",
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                          hash_begin)
+                    .count());
+    std::fflush(stdout);
+}
+
+// Diagnostic (GOW3_STALL=seconds:ms:mode): once, that many seconds after start, the GPU thread
+// waits. mode f: scheduler.Finish() then sleeps ms; s: only sleeps ms; n: n x scheduler.Finish()
+// (ms = n). To find which part of the GOW3_IMAGE_HASH pass at 120 s hides the lighting bug.
+void TextureCache::StallTick() {
+    static double at = -1;
+    static int amount = 0;
+    static char mode = 's';
+    static const bool parsed = [] {
+        if (const char* env = std::getenv("GOW3_STALL")) {
+            std::sscanf(env, "%lf:%d:%c", &at, &amount, &mode);
+        }
+        return true;
+    }();
+    (void)parsed;
+    if (at < 0) {
+        return;
+    }
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - ImageWatch().start).count();
+    if (seconds < at) {
+        return;
+    }
+    at = -1;
+    const auto begin = std::chrono::steady_clock::now();
+    if (mode == 'f') {
+        scheduler.Finish();
+        std::this_thread::sleep_for(std::chrono::milliseconds(amount));
+    } else if (mode == 'n') {
+        for (int i = 0; i < amount; ++i) {
+            scheduler.Finish();
+        }
+    } else {
+        std::this_thread::sleep_for(std::chrono::milliseconds(amount));
+    }
+    std::printf("Stall %.3f s mode %c amount %d took %.1f ms\n", seconds, mode, amount,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin)
+                    .count());
     std::fflush(stdout);
 }
 
@@ -1986,6 +2033,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     }
     CubeStatsTick();
     ImageHashTick();
+    StallTick();
 
     u64 key_hash = info.guest_address ^ info.guest_size << 17 ^ u64(info.pixel_format) << 40 ^
                    u64(info.size.width) << 24 ^ info.size.height ^ u64(desc.type) << 58 ^

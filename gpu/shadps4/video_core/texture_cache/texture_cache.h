@@ -483,6 +483,7 @@ private:
     void CubeStatsTick();
     void CubeArrayStats(Image& image);
     void ImageHashTick();
+    void StallTick();
 
     /// Linux fork: copies a separately rendered mip image into its parent (texture_cache.cpp).
     bool MergeRenderedMip(Image& sub, Image& parent, s32 mip, s32 slice);
