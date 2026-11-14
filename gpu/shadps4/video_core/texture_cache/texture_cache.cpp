@@ -1188,6 +1188,98 @@ void TextureCache::CubeArrayStats(Image& image) {
     }
 }
 
+// Diagnostic (GOW3_IMAGE_HASH=s1,s2,...: seconds after start): every registered colour image is
+// read back and hashed (all mips and layers), and images the GPU never wrote also get a hash of
+// their guest memory. Comparing the hash lists of a good and a bad level load shows which image
+// differs, and whether the game's data differed (guest hash) or only our copy of it (host hash).
+void TextureCache::ImageHashTick() {
+    static const std::vector<double> times = [] {
+        std::vector<double> out;
+        if (const char* env = std::getenv("GOW3_IMAGE_HASH")) {
+            std::string text = env;
+            size_t pos = 0;
+            while (pos < text.size()) {
+                const size_t comma = text.find(',', pos);
+                out.push_back(std::strtod(text.substr(pos, comma - pos).c_str(), nullptr));
+                if (comma == std::string::npos) break;
+                pos = comma + 1;
+            }
+        }
+        return out;
+    }();
+    static size_t next = 0;
+    if (next >= times.size()) {
+        return;
+    }
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - ImageWatch().start).count();
+    if (seconds < times[next]) {
+        return;
+    }
+    ++next;
+    std::printf("Image hashes %.3f s tick %llu\n", seconds,
+                static_cast<unsigned long long>(scheduler.CurrentTick()));
+    constexpr u64 MaxMipBytes = 48ull << 20;
+    for (Image& image : slot_images) {
+        const auto& info = image.info;
+        if (False(image.flags & ImageFlagBits::Registered)) {
+            continue;
+        }
+        const bool gpu = True(image.flags & ImageFlagBits::GpuModified);
+        std::string host = "-";
+        if (!info.props.is_depth && info.num_samples == 1 && info.num_bits >= 8) {
+            XXH3_state_t* state = XXH3_createState();
+            XXH3_64bits_reset(state);
+            bool ok = true;
+            for (u32 m = 0; m < info.resources.levels && ok; ++m) {
+                const u32 w = std::max(info.size.width >> m, 1u);
+                const u32 h = std::max(info.size.height >> m, 1u);
+                const u32 d = std::max(info.size.depth >> m, 1u);
+                const u64 texels = info.props.is_block ? u64((w + 3) / 4) * ((h + 3) / 4)
+                                                       : u64(w) * h;
+                const u64 bytes = texels * d * info.resources.layers * (info.num_bits / 8);
+                if (bytes == 0 || bytes > MaxMipBytes) {
+                    ok = false;
+                    break;
+                }
+                const auto download =
+                    runtime.GetStagingPool().Request(bytes * 2, MemoryType::HostCached, 16);
+                std::memset(download.mapped, 0, bytes * 2);
+                const vk::BufferImageCopy copy{
+                    .bufferOffset = download.offset,
+                    .bufferRowLength = 0,
+                    .bufferImageHeight = 0,
+                    .imageSubresource = {vk::ImageAspectFlagBits::eColor, m, 0,
+                                         info.resources.layers},
+                    .imageOffset = {0, 0, 0},
+                    .imageExtent = {w, h, d},
+                };
+                runtime.DownloadImage(&image, download.buffer, std::span{&copy, 1});
+                scheduler.Finish();
+                download.Invalidate();
+                XXH3_64bits_update(state, download.mapped, bytes);
+            }
+            if (ok) {
+                host = std::format("{:016x}", XXH3_64bits_digest(state));
+            }
+            XXH3_freeState(state);
+        }
+        std::string guest = "-";
+        if (!gpu && info.guest_size > 0) {
+            guest = std::format("{:016x}", XXH3_64bits(reinterpret_cast<const void*>(
+                                                           info.guest_address),
+                                                       info.guest_size));
+        }
+        std::printf("  img %#llx fmt %d type %d %ux%ux%u L%u/%u%s%s host %s guest %s\n",
+                    static_cast<unsigned long long>(info.guest_address), int(info.pixel_format),
+                    int(info.type), info.size.width, info.size.height, info.size.depth,
+                    info.resources.levels, info.resources.layers, gpu ? " gpu" : "",
+                    True(image.flags & ImageFlagBits::Dirty) ? " dirty" : "", host.c_str(),
+                    guest.c_str());
+    }
+    std::fflush(stdout);
+}
+
 void TextureCache::WatchLine(const std::string& text) {
     auto& spec = ImageWatch();
     u32 left = spec.lines.load(std::memory_order_relaxed);
@@ -1880,6 +1972,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         lock.lock();
     }
     CubeStatsTick();
+    ImageHashTick();
 
     u64 key_hash = info.guest_address ^ info.guest_size << 17 ^ u64(info.pixel_format) << 40 ^
                    u64(info.size.width) << 24 ^ info.size.height ^ u64(desc.type) << 58 ^
