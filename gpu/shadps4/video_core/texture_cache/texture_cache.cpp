@@ -1058,6 +1058,11 @@ void TextureCache::CubeStatsTick() {
             info.pixel_format != vk::Format::eR16G16B16A16Sfloat || info.resources.layers < 6 ||
             info.size.width > 128 || info.size.height > 128 || info.size.depth != 1 ||
             info.resources.layers > 64) {
+            if (True(image.flags & ImageFlagBits::Registered) &&
+                info.pixel_format == vk::Format::eR16G16B16A16Sfloat &&
+                info.size.width == 128 && info.resources.layers > 64) {
+                CubeArrayStats(image);
+            }
             continue;
         }
         std::vector<vk::BufferImageCopy> copies;
@@ -1121,6 +1126,66 @@ void TextureCache::CubeStatsTick() {
         }
     }
     std::fflush(stdout);
+}
+
+// The reflection captures' cube array: one line per cube (6 layers), each mip's mean over its faces.
+void TextureCache::CubeArrayStats(Image& image) {
+    const auto& info = image.info;
+    std::printf("  %#llx %ux%u L%u/%u array%s:\n", static_cast<unsigned long long>(info.guest_address),
+                info.size.width, info.size.height, info.resources.levels, info.resources.layers,
+                True(image.flags & ImageFlagBits::GpuModified) ? " gpu-modified" : "");
+    for (u32 cube = 0; cube * 6 + 6 <= info.resources.layers; ++cube) {
+        std::vector<vk::BufferImageCopy> copies;
+        u64 total = 0;
+        for (u32 m = 0; m < info.resources.levels; ++m) {
+            const u32 w = std::max(info.size.width >> m, 1u);
+            copies.push_back(vk::BufferImageCopy{
+                .bufferOffset = total,
+                .bufferRowLength = 0,
+                .bufferImageHeight = 0,
+                .imageSubresource = {vk::ImageAspectFlagBits::eColor, m, cube * 6, 6},
+                .imageOffset = {0, 0, 0},
+                .imageExtent = {w, w, 1},
+            });
+            total += u64(w) * w * 6 * 8;
+        }
+        const auto download = runtime.GetStagingPool().Request(total, MemoryType::HostCached, 16);
+        for (auto& copy : copies) {
+            copy.bufferOffset += download.offset;
+        }
+        runtime.DownloadImage(&image, download.buffer, copies);
+        scheduler.Finish();
+        download.Invalidate();
+        std::string line;
+        u64 offset = 0;
+        float largest = 0.f;
+        u64 bad = 0;
+        bool all_zero = true;
+        for (u32 m = 0; m < info.resources.levels; ++m) {
+            const u32 w = std::max(info.size.width >> m, 1u);
+            const u64 texels = u64(w) * w * 6;
+            const auto* half = reinterpret_cast<const u16*>(download.mapped + offset);
+            double sum = 0;
+            for (u64 t = 0; t < texels; ++t) {
+                for (u32 c = 0; c < 3; ++c) {
+                    const float v = HalfToFloat(half[t * 4 + c]);
+                    if (!std::isfinite(v)) {
+                        ++bad;
+                        continue;
+                    }
+                    all_zero &= v == 0.f;
+                    sum += v;
+                    largest = std::max(largest, std::fabs(v));
+                }
+            }
+            line += std::format(" {:.4g}", sum / (3.0 * texels));
+            offset += texels * 8;
+        }
+        if (!all_zero || bad) {
+            std::printf("    cube %u: mips%s max %.4g nonfinite %llu\n", cube, line.c_str(), largest,
+                        static_cast<unsigned long long>(bad));
+        }
+    }
 }
 
 void TextureCache::WatchLine(const std::string& text) {
