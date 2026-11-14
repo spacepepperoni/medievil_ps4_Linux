@@ -1226,8 +1226,11 @@ void TextureCache::ImageHashTick() {
             continue;
         }
         const bool gpu = True(image.flags & ImageFlagBits::GpuModified);
-        std::string host = "-";
-        if (!info.props.is_depth && info.num_samples == 1 && info.num_bits >= 8) {
+        const bool dirty = True(image.flags & ImageFlagBits::Dirty);
+        const auto host_hash = [&]() -> std::string {
+            if (info.props.is_depth || info.num_samples != 1 || info.num_bits < 8) {
+                return "-";
+            }
             XXH3_state_t* state = XXH3_createState();
             XXH3_64bits_reset(state);
             bool ok = true;
@@ -1259,23 +1262,33 @@ void TextureCache::ImageHashTick() {
                 download.Invalidate();
                 XXH3_64bits_update(state, download.mapped, bytes);
             }
-            if (ok) {
-                host = std::format("{:016x}", XXH3_64bits_digest(state));
-            }
+            const u64 digest = XXH3_64bits_digest(state);
             XXH3_freeState(state);
-        }
+            return ok ? std::format("{:016x}", digest) : std::string("-");
+        };
+        const std::string host = host_hash();
         std::string guest = "-";
         if (!gpu && info.guest_size > 0) {
             guest = std::format("{:016x}", XXH3_64bits(reinterpret_cast<const void*>(
                                                            info.guest_address),
                                                        info.guest_size));
         }
-        std::printf("  img %#llx fmt %d type %d %ux%ux%u L%u/%u%s%s host %s guest %s\n",
+        // An image only the CPU writes, not marked dirty: upload it again from guest memory. A
+        // different result means our copy had missed a write to its memory (stale).
+        std::string stale;
+        if (!gpu && !dirty && host != "-") {
+            image.flags |= ImageFlagBits::CpuDirty;
+            RefreshImage(image);
+            const std::string again = host_hash();
+            if (again != host) {
+                stale = " STALE " + again;
+            }
+        }
+        std::printf("  img %#llx fmt %d type %d %ux%ux%u L%u/%u%s%s host %s guest %s%s\n",
                     static_cast<unsigned long long>(info.guest_address), int(info.pixel_format),
                     int(info.type), info.size.width, info.size.height, info.size.depth,
                     info.resources.levels, info.resources.layers, gpu ? " gpu" : "",
-                    True(image.flags & ImageFlagBits::Dirty) ? " dirty" : "", host.c_str(),
-                    guest.c_str());
+                    dirty ? " dirty" : "", host.c_str(), guest.c_str(), stale.c_str());
     }
     std::fflush(stdout);
 }
