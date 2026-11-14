@@ -1002,11 +1002,33 @@ bool TextureCache::Watched(const ImageInfo& info) const {
     if (spec.width == 0 && spec.height == 0) {
         // GOW3_IMAGE_WATCH=0x0:6: every image of at most 64x64 with at least that many layers
         // (a cube and the separate images of its mips).
+        // GOW3_IMAGE_WATCH_FMT=1: only RGBA16F (the sky light's cubes and their mips).
+        static const bool fmt_only = [] {
+            const char* env = std::getenv("GOW3_IMAGE_WATCH_FMT");
+            return env && env[0] == '1';
+        }();
+        if (fmt_only && info.pixel_format != vk::Format::eR16G16B16A16Sfloat) {
+            return false;
+        }
         return spec.min_layers != 0 && info.size.width <= 64 && info.size.height <= 64 &&
                info.resources.layers >= spec.min_layers;
     }
     return spec.width != 0 && info.size.width == spec.width && info.size.height == spec.height &&
            info.resources.layers >= spec.min_layers;
+}
+
+void TextureCache::WatchLine(const std::string& text) {
+    auto& spec = ImageWatch();
+    u32 left = spec.lines.load(std::memory_order_relaxed);
+    while (left && !spec.lines.compare_exchange_weak(left, left - 1, std::memory_order_relaxed)) {
+    }
+    if (!left) {
+        return;
+    }
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - spec.start).count();
+    std::printf("Image watch %.3f s: %s tick %llu\n", seconds, text.c_str(),
+                static_cast<unsigned long long>(scheduler.CurrentTick()));
 }
 
 void TextureCache::WatchNote(const Image& image, const char* event, const std::string& detail) {
@@ -1745,6 +1767,34 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
 
     ImageId image_id{};
 
+    // Diagnostic (GOW3_IMAGE_WATCH): a watched request lists what is already in its range.
+    bool watch_request = Watched(info);
+    for (const auto& cache_id : image_ids) {
+        watch_request |= Watched(slot_images[cache_id].info);
+    }
+    if (watch_request && ImageWatch().width == 0) {
+        static constexpr const char* bindings[] = {"texture", "storage", "render target",
+                                                   "depth target", "video out"};
+        const u32 b = u32(desc.type);
+        std::string list;
+        for (const auto& cache_id : image_ids) {
+            const auto& c = slot_images[cache_id];
+            list += std::format(" [{:#x} {}x{}x{} L{}/{} {} size {:#x}{}{}{} age {}]",
+                                c.info.guest_address, c.info.size.width, c.info.size.height,
+                                c.info.size.depth, c.info.resources.levels, c.info.resources.layers,
+                                vk::to_string(c.info.pixel_format), c.info.guest_size,
+                                True(c.flags & ImageFlagBits::GpuModified) ? " gpu-modified" : "",
+                                c.binding.is_target ? " target" : "",
+                                True(c.flags & ImageFlagBits::Registered) ? "" : " unregistered",
+                                scheduler.CurrentTick() - c.tick_accessed_last);
+        }
+        WatchLine(std::format("request {:#x} {}x{}x{} L{}/{} {} size {:#x} as {}; in range:{}",
+                              info.guest_address, info.size.width, info.size.height, info.size.depth,
+                              info.resources.levels, info.resources.layers,
+                              vk::to_string(info.pixel_format), info.guest_size,
+                              b < 5 ? bindings[b] : "?", list.empty() ? " nothing" : list));
+    }
+
     // Check for a perfect match first
     for (const auto& cache_id : image_ids) {
         auto& cache_image = slot_images[cache_id];
@@ -1902,6 +1952,12 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     Image& image = slot_images[image_id];
     image.tick_accessed_last = scheduler.CurrentTick();
     TouchImage(image);
+    if (watch_request && ImageWatch().width == 0) {
+        WatchLine(std::format("  -> {:#x} {}x{} L{}/{} mip {} slice {}", image.info.guest_address,
+                              image.info.size.width, image.info.size.height,
+                              image.info.resources.levels, image.info.resources.layers, view_mip,
+                              view_slice));
+    }
 
     // If the image requested is a subresource of the image from cache record its location.
     if (view_mip > 0) {
