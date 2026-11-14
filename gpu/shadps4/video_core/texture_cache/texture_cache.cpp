@@ -1022,6 +1022,107 @@ bool TextureCache::Watched(const ImageInfo& info) const {
            info.resources.layers >= spec.min_layers;
 }
 
+// Diagnostic (GOW3_CUBE_STATS=s1,s2,...: seconds after start): every RGBA16F image of at most
+// 128x128 with 6 or more layers (the sky light's and reflection captures' cubes) is read back
+// and each mip's mean / largest value printed, to compare a good level load with a bad one.
+void TextureCache::CubeStatsTick() {
+    static const std::vector<double> times = [] {
+        std::vector<double> out;
+        if (const char* env = std::getenv("GOW3_CUBE_STATS")) {
+            std::string text = env;
+            size_t pos = 0;
+            while (pos < text.size()) {
+                const size_t comma = text.find(',', pos);
+                out.push_back(std::strtod(text.substr(pos, comma - pos).c_str(), nullptr));
+                if (comma == std::string::npos) break;
+                pos = comma + 1;
+            }
+        }
+        return out;
+    }();
+    static size_t next = 0;
+    if (next >= times.size()) {
+        return;
+    }
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - ImageWatch().start).count();
+    if (seconds < times[next]) {
+        return;
+    }
+    ++next;
+    std::printf("Cube stats %.3f s tick %llu\n", seconds,
+                static_cast<unsigned long long>(scheduler.CurrentTick()));
+    for (Image& image : slot_images) {
+        const auto& info = image.info;
+        if (False(image.flags & ImageFlagBits::Registered) ||
+            info.pixel_format != vk::Format::eR16G16B16A16Sfloat || info.resources.layers < 6 ||
+            info.size.width > 128 || info.size.height > 128 || info.size.depth != 1 ||
+            info.resources.layers > 64) {
+            continue;
+        }
+        std::vector<vk::BufferImageCopy> copies;
+        u64 total = 0;
+        for (u32 m = 0; m < info.resources.levels; ++m) {
+            const u32 w = std::max(info.size.width >> m, 1u);
+            const u32 h = std::max(info.size.height >> m, 1u);
+            copies.push_back(vk::BufferImageCopy{
+                .bufferOffset = total,
+                .bufferRowLength = 0,
+                .bufferImageHeight = 0,
+                .imageSubresource = {vk::ImageAspectFlagBits::eColor, m, 0, info.resources.layers},
+                .imageOffset = {0, 0, 0},
+                .imageExtent = {w, h, 1},
+            });
+            total += u64(w) * h * info.resources.layers * 8;
+        }
+        const auto download = runtime.GetStagingPool().Request(total, MemoryType::HostCached, 16);
+        for (auto& copy : copies) {
+            copy.bufferOffset += download.offset;
+        }
+        runtime.DownloadImage(&image, download.buffer, copies);
+        scheduler.Finish();
+        download.Invalidate();
+        std::printf("  %#llx %ux%u L%u/%u%s:\n", static_cast<unsigned long long>(info.guest_address),
+                    info.size.width, info.size.height, info.resources.levels, info.resources.layers,
+                    True(image.flags & ImageFlagBits::GpuModified) ? " gpu-modified" : "");
+        u64 offset = 0;
+        for (u32 m = 0; m < info.resources.levels; ++m) {
+            const u32 w = std::max(info.size.width >> m, 1u);
+            const u32 h = std::max(info.size.height >> m, 1u);
+            const u64 texels = u64(w) * h * info.resources.layers;
+            const auto* half = reinterpret_cast<const u16*>(download.mapped + offset);
+            double sum[3] = {};
+            float largest = 0.f;
+            u64 bad = 0;
+            std::string faces;
+            for (u32 layer = 0; layer < std::min(info.resources.layers, 6u); ++layer) {
+                double face = 0;
+                for (u64 t = u64(layer) * w * h; t < u64(layer + 1) * w * h; ++t) {
+                    face += HalfToFloat(half[t * 4]) + HalfToFloat(half[t * 4 + 1]) +
+                            HalfToFloat(half[t * 4 + 2]);
+                }
+                faces += std::format(" {:.4g}", face / (3.0 * w * h));
+            }
+            for (u64 t = 0; t < texels; ++t) {
+                for (u32 c = 0; c < 3; ++c) {
+                    const float v = HalfToFloat(half[t * 4 + c]);
+                    if (!std::isfinite(v)) {
+                        ++bad;
+                        continue;
+                    }
+                    sum[c] += v;
+                    largest = std::max(largest, std::fabs(v));
+                }
+            }
+            std::printf("    mip %u: mean %.4g %.4g %.4g max %.4g nonfinite %llu faces%s\n", m,
+                        sum[0] / texels, sum[1] / texels, sum[2] / texels, largest,
+                        static_cast<unsigned long long>(bad), faces.c_str());
+            offset += texels * 8;
+        }
+    }
+    std::fflush(stdout);
+}
+
 void TextureCache::WatchLine(const std::string& text) {
     auto& spec = ImageWatch();
     u32 left = spec.lines.load(std::memory_order_relaxed);
@@ -1713,6 +1814,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         GOW3_SECTION(CacheLock);
         lock.lock();
     }
+    CubeStatsTick();
 
     u64 key_hash = info.guest_address ^ info.guest_size << 17 ^ u64(info.pixel_format) << 40 ^
                    u64(info.size.width) << 24 ^ info.size.height ^ u64(desc.type) << 58 ^

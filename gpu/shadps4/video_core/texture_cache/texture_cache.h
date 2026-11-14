@@ -480,6 +480,7 @@ private:
     bool Watched(const ImageInfo& info) const;
     void WatchNote(const Image& image, const char* event, const std::string& detail = {});
     void WatchLine(const std::string& text);
+    void CubeStatsTick();
 
     /// Linux fork: copies a separately rendered mip image into its parent (texture_cache.cpp).
     bool MergeRenderedMip(Image& sub, Image& parent, s32 mip, s32 slice);
