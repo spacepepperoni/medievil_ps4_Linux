@@ -1010,8 +1010,13 @@ bool TextureCache::Watched(const ImageInfo& info) const {
         if (fmt_only && info.pixel_format != vk::Format::eR16G16B16A16Sfloat) {
             return false;
         }
-        return spec.min_layers != 0 && info.size.width <= 64 && info.size.height <= 64 &&
-               info.resources.layers >= spec.min_layers;
+        // GOW3_IMAGE_WATCH_MAX: the largest width / height watched (default 64).
+        static const u32 max_size = [] {
+            const char* env = std::getenv("GOW3_IMAGE_WATCH_MAX");
+            return env && *env ? u32(std::strtoul(env, nullptr, 10)) : 64u;
+        }();
+        return spec.min_layers != 0 && info.size.width <= max_size &&
+               info.size.height <= max_size && info.resources.layers >= spec.min_layers;
     }
     return spec.width != 0 && info.size.width == spec.width && info.size.height == spec.height &&
            info.resources.layers >= spec.min_layers;
