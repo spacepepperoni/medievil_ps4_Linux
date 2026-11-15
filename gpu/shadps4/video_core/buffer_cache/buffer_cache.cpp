@@ -1227,17 +1227,13 @@ void PrintBufferStats() {
 }
 } // namespace
 
-void BufferCache::BufferCheckTick() {
+void BufferCache::BufferCheckTick(double seconds) {
     static const double at = [] {
         const char* env = std::getenv("GOW3_BUFFER_CHECK");
         return env ? std::strtod(env, nullptr) : -1.0;
     }();
-    if (at < 0) {
-        return;
-    }
-    static const auto first = std::chrono::steady_clock::now();
     static bool done = false;
-    if (done || std::chrono::duration<double>(std::chrono::steady_clock::now() - first).count() < at) {
+    if (at < 0 || done || seconds < at) {
         return;
     }
     done = true;
@@ -1340,7 +1336,6 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
                                                         bool is_written, bool is_texel_buffer,
                                                         std::source_location caller) {
     GOW3_SECTION(ObtainBuffer);
-    BufferCheckTick();
     {
         GOW3_SECTION(ObtReadbacks);
         texture_cache.ResolveReadbacks(device_addr, size, true, ReadbackSource::BufferObtain);

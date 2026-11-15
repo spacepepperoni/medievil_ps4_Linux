@@ -135,11 +135,11 @@ public:
     /// Processes the fault buffer.
     void ProcessFaultBuffer();
 
-    /// Linux fork diagnostic (GOW3_BUFFER_CHECK=seconds): once, that long after the first
-    /// buffer request, every resident arena range is copied back and compared page by page with
+    /// Linux fork diagnostic (GOW3_BUFFER_CHECK=seconds): once, when `seconds` (the texture cache's
+    /// clock, as GOW3_IMAGE_HASH) reaches that time, every resident arena range is copied back and compared page by page with
     /// guest memory; pages neither GPU-written nor waiting for an upload that differ are printed
     /// as STALE (the GPU's copy missed a CPU write, or holds bytes the guest never had).
-    void BufferCheckTick();
+    void BufferCheckTick(double seconds);
 
     /// Synchronizes all buffers needed for DMA.
     void SynchronizeDmaBuffers();

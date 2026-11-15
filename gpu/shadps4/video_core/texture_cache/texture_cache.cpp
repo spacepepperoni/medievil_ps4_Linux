@@ -2034,6 +2034,9 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     CubeStatsTick();
     ImageHashTick();
     StallTick();
+    // Linux fork diagnostic (GOW3_BUFFER_CHECK): on this thread and clock, as the image hashes.
+    buffer_cache.BufferCheckTick(
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - ImageWatch().start).count());
 
     u64 key_hash = info.guest_address ^ info.guest_size << 17 ^ u64(info.pixel_format) << 40 ^
                    u64(info.size.width) << 24 ^ info.size.height ^ u64(desc.type) << 58 ^
