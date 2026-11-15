@@ -15,8 +15,10 @@
 #include <bit>
 #include <cstdlib>
 #include <cstring>
+#include <format>
 #include <optional>
 #include <string>
+#include <vector>
 #include <magic_enum/magic_enum.hpp>
 #include "gow3_copy.h"
 #include "gow3_sections.h"
@@ -1225,10 +1227,120 @@ void PrintBufferStats() {
 }
 } // namespace
 
+void BufferCache::BufferCheckTick() {
+    static const double at = [] {
+        const char* env = std::getenv("GOW3_BUFFER_CHECK");
+        return env ? std::strtod(env, nullptr) : -1.0;
+    }();
+    if (at < 0) {
+        return;
+    }
+    static const auto first = std::chrono::steady_clock::now();
+    static bool done = false;
+    if (done || std::chrono::duration<double>(std::chrono::steady_clock::now() - first).count() < at) {
+        return;
+    }
+    done = true;
+    const auto begin = std::chrono::steady_clock::now();
+    ProcessCpuWrites();
+    scheduler.Finish();
+    constexpr u64 Page = 4_KB;
+    constexpr u64 Chunk = 4_MB;
+    u64 checked = 0, skipped_gpu = 0, skipped_cpu = 0, unreadable = 0, stale_pages = 0;
+    std::vector<u8> guest(Page);
+    VAddr run_start = 0, run_end = 0;
+    std::string run_note;
+    unsigned printed = 0;
+    const auto flush_run = [&] {
+        if (run_end > run_start && printed < 400) {
+            std::printf("  STALE %#llx +%#llx%s\n", static_cast<unsigned long long>(run_start),
+                        static_cast<unsigned long long>(run_end - run_start), run_note.c_str());
+            ++printed;
+        }
+        run_start = run_end = 0;
+        run_note.clear();
+    };
+    std::printf("Buffer check %.1f s tick %llu: %zu resident ranges\n", at,
+                static_cast<unsigned long long>(scheduler.CurrentTick()),
+                static_cast<size_t>(std::distance(resident_ranges.begin(), resident_ranges.end())));
+    for (const Backing& backing : resident_ranges) {
+        const VAddr range_end = VAddr(backing.end) << block_shift;
+        for (VAddr addr = VAddr(backing.start) << block_shift; addr < range_end;) {
+            const u64 size = std::min<u64>(range_end - addr, Chunk);
+            const u64 first_block = addr >> block_shift;
+            const u64 last_block = (addr + size - 1) >> block_shift;
+            const Buffer* arena = address_space[first_block >> blocks_per_arena_page_shift];
+            if (!arena || arena != address_space[last_block >> blocks_per_arena_page_shift]) {
+                addr += size;
+                continue;
+            }
+            const auto download = staging_pool.Request(size, VideoCore::MemoryType::HostCached);
+            const vk::BufferCopy copy{arena->Offset(addr), download.offset, size};
+            runtime.CopyBuffer(arena, download.buffer, std::span{&copy, 1});
+            scheduler.Finish();
+            download.Invalidate();
+            for (u64 off = 0; off < size; off += Page) {
+                const VAddr page = addr + off;
+                if (memory_tracker->IsRegionGpuModified(page, Page)) {
+                    ++skipped_gpu;
+                    flush_run();
+                    continue;
+                }
+                if (memory_tracker->IsRegionCpuModified(page, Page)) {
+                    ++skipped_cpu;
+                    flush_run();
+                    continue;
+                }
+                if (!Core::Memory::Instance()->ReadBacking(page, guest.data(), Page)) {
+                    ++unreadable;
+                    flush_run();
+                    continue;
+                }
+                ++checked;
+                const u8* host = download.mapped + off;
+                if (std::memcmp(host, guest.data(), Page) == 0) {
+                    flush_run();
+                    continue;
+                }
+                ++stale_pages;
+                if (run_end == page) {
+                    run_end = page + Page;
+                    continue;
+                }
+                flush_run();
+                run_start = page;
+                run_end = page + Page;
+                u64 at_byte = 0;
+                while (at_byte < Page && host[at_byte] == guest[at_byte]) {
+                    ++at_byte;
+                }
+                std::string host_bytes, guest_bytes;
+                for (u64 i = at_byte & ~u64{15}; i < (at_byte & ~u64{15}) + 16 && i < Page; ++i) {
+                    host_bytes += std::format("{:02x}", host[i]);
+                    guest_bytes += std::format("{:02x}", guest[i]);
+                }
+                run_note = std::format(" first diff +{:#x} host {} guest {}", at_byte, host_bytes,
+                                       guest_bytes);
+            }
+            flush_run();
+            addr += size;
+        }
+    }
+    flush_run();
+    std::printf("Buffer check: %llu pages compared, %llu stale; skipped %llu GPU-written, %llu "
+                "awaiting upload, %llu unreadable; %.1f ms\n",
+                static_cast<unsigned long long>(checked), static_cast<unsigned long long>(stale_pages),
+                static_cast<unsigned long long>(skipped_gpu), static_cast<unsigned long long>(skipped_cpu),
+                static_cast<unsigned long long>(unreadable),
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count());
+    std::fflush(stdout);
+}
+
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
                                                         bool is_written, bool is_texel_buffer,
                                                         std::source_location caller) {
     GOW3_SECTION(ObtainBuffer);
+    BufferCheckTick();
     {
         GOW3_SECTION(ObtReadbacks);
         texture_cache.ResolveReadbacks(device_addr, size, true, ReadbackSource::BufferObtain);
