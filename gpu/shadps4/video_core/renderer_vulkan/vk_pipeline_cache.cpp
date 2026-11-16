@@ -1,3 +1,4 @@
+#include <unordered_map>
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -648,6 +649,36 @@ bool PipelineCache::AsyncCompilation() const {
 // skipped while its pipeline compiles in the background is lost for good, so these compile
 // on the spot. UE4's particle curve injection (FParticleCurveTexture): without it the curve
 // texture keeps its red clear and GPU sprites such as the torch flames get a zero size.
+// gow3 diagnostic (GOW3_LOG_SKIPPED_DRAWS=1): every vertex/pixel program pair whose draw is
+// dropped because its pipeline is still compiling, the first time it happens and with how many
+// seconds after start, to find the load-time draws a level loses at random.
+static void LogSkippedDraw(const std::array<const Shader::Info*, MaxShaderStages>& infos) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("GOW3_LOG_SKIPPED_DRAWS");
+        return env && env[0] == '1';
+    }();
+    if (!enabled) {
+        return;
+    }
+    static const auto start = std::chrono::steady_clock::now();
+    static std::mutex mutex;
+    static std::unordered_map<u64, u32> seen;
+    const auto hash = [&](Shader::SwStage stage) -> u64 {
+        const Shader::Info* info = infos[static_cast<u32>(stage)];
+        return info ? info->pgm_hash : 0;
+    };
+    const u64 vs = hash(Shader::SwStage::Vertex);
+    const u64 ps = hash(Shader::SwStage::Fragment);
+    std::scoped_lock lock{mutex};
+    const u32 count = ++seen[vs * 31 + ps];
+    if (count == 1 || count == 100 || count == 10000) {
+        std::printf("Skipped draw %.3f s: vs %016llx ps %016llx (%u so far)\n",
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(),
+                    static_cast<unsigned long long>(vs), static_cast<unsigned long long>(ps), count);
+        std::fflush(stdout);
+    }
+}
+
 static bool MustCompileSync(u64 pgm_hash) {
     constexpr u64 programs[] = {
         0x113f0c20873a7659ull, // vs: curve injection
@@ -735,6 +766,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     if (!RefreshGraphicsKey(sel)) {
         if (sel.compilation_pending) {
             ++g_gow3_pending_draws;
+            LogSkippedDraw(sel.infos);
         }
         return nullptr;
     }
@@ -777,6 +809,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
             }
         }
         ++g_gow3_pending_draws;
+        LogSkippedDraw(sel.infos);
         return nullptr;
     }
     const auto [it, is_new] = graphics_pipelines.try_emplace(sel.graphics_key);
