@@ -19,7 +19,7 @@ The launcher has a built-in updater that can be toggled on/off in Advanced.
 
 ## Steam Deck
 - Install the [AppImage](https://github.com/spacepepperoni/medievil_ps4_Linux/releases/latest/download/MediEvil-x86_64.AppImage), open it once in Desktop Mode and choose your game folder, then press **Advanced → Add to Steam** to play in Game Mode.
-- In the Display tab, Steam Deck mode is auto-selected if you are on SteamOS: fullscreen, 720p, Low graphics and a 60 or 30 FPS cap.
+- In the Display tab, Steam Deck mode is auto-selected if you are on SteamOS: fullscreen, the 3D scene at 720p inside a 1080p picture (so loading screens and movies stay sharp), the Steam Deck graphics level and a 30 FPS cap (60 can be chosen).
 
 ## Files needed
 
