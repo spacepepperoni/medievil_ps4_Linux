@@ -548,6 +548,11 @@ DECK_SETTINGS = {
     'ue4_quality': 'deck',                # upstream's Steam Deck graphics level (1.4.0)
     'vsync': '1',
 }
+# Linux fork: on top of upstream's Steam Deck level, the sun and moon shadows at 2048 px and
+# filtered (High, the PS4's own) instead of 1024 and unfiltered (Low), as the fork's earlier Deck
+# preset had: at the level's values shadow edges came out blocky and jumped while the camera moved
+# (the skeleton's shadow on the main menu's gravestone, Pumpkin Gorge); the frame rate stayed the same.
+DECK_SHADOWS = {'sun_shadow_resolution': '2048', 'shadow_quality': '3'}
 DECK_LOCKED = (*DECK_SETTINGS, 'fps_limit')
 APP_DEFAULTS = {'deck_mode': False, 'deck_fps': '30', 'record_inputs': False, 'deck_steady_clock': True,
                 'stereo_surround': 'off'}
@@ -595,7 +600,12 @@ def deck_updates(settings, ini_path):
         if settings.get('deck_mode'):
             keys = {key: DECK_SETTINGS[key] for key in ('output_resolution', 'render_scale', 'ue4_quality')}
             keys.update(graphics_options.level_choices(graphics_options.DECK_LEVEL))
+            keys.update(DECK_SHADOWS)
             graphics_options.write_keys(ini_path, keys)
+    if not settings.get('deck_shadows'):
+        settings['deck_shadows'] = changed = True
+        if settings.get('deck_mode'):
+            graphics_options.write_keys(ini_path, DECK_SHADOWS)
     return changed
 
 
@@ -641,7 +651,7 @@ def deck_values(launcher):
     import graphics_options
     # 1.4.0: every graphics setting at upstream's Steam Deck level as well.
     return {**DECK_SETTINGS, 'fps_limit': launcher.var('deck_fps', 'app').get(),
-            **graphics_options.level_choices(graphics_options.DECK_LEVEL)}
+            **graphics_options.level_choices(graphics_options.DECK_LEVEL), **DECK_SHADOWS}
 
 
 def set_var(launcher, key, value, ini_flags):
