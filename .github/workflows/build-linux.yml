@@ -5,11 +5,11 @@ name: Build Linux/Steam Deck
 on:
   push:
     branches: [main]
-    paths-ignore: ['**.md', 'docs/**', '.github/workflows/sync-upstream.yml', '.github/workflows/release.yml']
+    paths-ignore: ['**.md', 'docs/**', '.github/workflows/release.yml']
   pull_request:
     paths-ignore: ['**.md', 'docs/**']
   workflow_dispatch:
-  # sync-upstream.yml builds a merge of an upstream release before it reaches main (no release then).
+  # Another workflow can build a given ref (no release then).
   workflow_call:
     inputs:
       ref:
