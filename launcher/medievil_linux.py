@@ -553,6 +553,10 @@ DECK_SETTINGS = {
 # preset had: at the level's values shadow edges came out blocky and jumped while the camera moved
 # (the skeleton's shadow on the main menu's gravestone, Pumpkin Gorge); the frame rate stayed the same.
 DECK_SHADOWS = {'sun_shadow_resolution': '2048', 'shadow_quality': '3'}
+# Linux fork: refraction on (upstream's Steam Deck level turns it off). Materials drawn only by
+# refraction vanished without it: the ice tunnel in MediEvil's The Lake was see-through. UE4 only
+# runs the refraction pass where such materials are on screen.
+DECK_REFRACTION = {'refraction': '2'}
 DECK_LOCKED = (*DECK_SETTINGS, 'fps_limit')
 APP_DEFAULTS = {'deck_mode': False, 'deck_fps': '30', 'record_inputs': False, 'deck_steady_clock': True,
                 'stereo_surround': 'off'}
@@ -601,11 +605,16 @@ def deck_updates(settings, ini_path):
             keys = {key: DECK_SETTINGS[key] for key in ('output_resolution', 'render_scale', 'ue4_quality')}
             keys.update(graphics_options.level_choices(graphics_options.DECK_LEVEL))
             keys.update(DECK_SHADOWS)
+            keys.update(DECK_REFRACTION)
             graphics_options.write_keys(ini_path, keys)
     if not settings.get('deck_shadows'):
         settings['deck_shadows'] = changed = True
         if settings.get('deck_mode'):
             graphics_options.write_keys(ini_path, DECK_SHADOWS)
+    if not settings.get('deck_refraction'):
+        settings['deck_refraction'] = changed = True
+        if settings.get('deck_mode'):
+            graphics_options.write_keys(ini_path, DECK_REFRACTION)
     return changed
 
 
@@ -651,7 +660,8 @@ def deck_values(launcher):
     import graphics_options
     # 1.4.0: every graphics setting at upstream's Steam Deck level as well.
     return {**DECK_SETTINGS, 'fps_limit': launcher.var('deck_fps', 'app').get(),
-            **graphics_options.level_choices(graphics_options.DECK_LEVEL), **DECK_SHADOWS}
+            **graphics_options.level_choices(graphics_options.DECK_LEVEL), **DECK_SHADOWS,
+            **DECK_REFRACTION}
 
 
 def set_var(launcher, key, value, ini_flags):
