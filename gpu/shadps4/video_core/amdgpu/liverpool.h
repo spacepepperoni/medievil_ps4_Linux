@@ -88,6 +88,8 @@ struct Liverpool {
     static constexpr u64 NoSeq = ~0ull;
     u64 gfx_submit_seq{};
     static u64 HashRegisterPacket(u64 checksum, const u32* words, u32 count);
+    /// gow3 A3: GOW3_REG_HASH_PAIRED=1 at start (restart-only).
+    static bool PairedRegisterHash();
     /// `dirty` (draw-preparation scanner) records the register blocks written.
     static void ApplyGraphicsRegisterPacket(Regs& regs, const PM4Header* header, u64& checksum,
                                             RegDirty* dirty = nullptr);
@@ -99,10 +101,15 @@ public:
     void SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb);
     void SubmitAsc(u32 gnm_vqid, std::span<const u32> acb);
 
-    void SubmitDone() noexcept {
+    /// `frame` (GOW3_GPU_FENCES' pacing, gow3_gpu_fences.h): the frame this sceGnmSubmitDone
+    /// ends; once its submissions are decoded, "frame retired" follows them on the GPU.
+    void SubmitDone(u64 frame = 0) noexcept {
         std::scoped_lock lk{submit_mutex};
         mapped_queues[GfxQueueId].ccb_buffer_offset = 0;
         mapped_queues[GfxQueueId].dcb_buffer_offset = 0;
+        if (frame != 0) {
+            frame_ends.emplace_back(submit_counter.load(std::memory_order_relaxed), frame);
+        }
         submit_done = true;
         submit_cv.notify_one();
     }
@@ -130,50 +137,16 @@ public:
         rasterizer = rasterizer_;
     }
 
-    /// Linux fork: runs only the commands whose sender waits for them (guest threads' write
-    /// faults and read backs). For the GPU command thread while it waits for the GPU, so those
-    /// threads are not held up for the whole wait.
-    void ProcessWaitingCommands();
-
-    /// Linux fork: GOW3_FRAME_WAIT_SERVE=1 (vk_presenter.cpp): waiting callers get their own queue.
-    static bool ServeWaits() {
-        static const bool serve = [] {
-            const char* env = std::getenv("GOW3_FRAME_WAIT_SERVE");
-            return env && env[0] == '1';
-        }();
-        return serve;
-    }
-
     template <bool wait_done = false>
     void SendCommand(auto&& func) {
         if constexpr (wait_done) {
-            // Linux fork: a caller that waits (a guest thread's write fault or read back) goes
-            // into its own queue, which the GPU command thread also serves while it waits for
-            // the GPU (ProcessWaitingCommands), and before the other commands (flips). Only with
-            // GOW3_FRAME_WAIT_SERVE=1: taken ahead of the commands queued before it, the Hilltop
-            // Mausoleum's lights came out in random colours run to run on the Steam Deck.
-            if (!ServeWaits()) {
-                std::binary_semaphore sem{0};
-                {
-                    std::scoped_lock lk{submit_mutex};
-                    command_queue.emplace([&sem, &func] {
-                        func();
-                        sem.release();
-                    });
-                    ++num_commands;
-                    submit_cv.notify_one();
-                }
-                sem.acquire();
-                return;
-            }
             std::binary_semaphore sem{0};
             {
                 std::scoped_lock lk{submit_mutex};
-                waiting_queue.emplace([&sem, &func] {
+                command_queue.emplace([&sem, &func] {
                     func();
                     sem.release();
                 });
-                ++num_waiting;
                 ++num_commands;
                 submit_cv.notify_one();
             }
@@ -192,6 +165,11 @@ public:
         constexpr size_t GfxReservedSize = 2_MB >> 2;
         gfx_queue.ccb_buffer.reserve(GfxReservedSize);
         gfx_queue.dcb_buffer.reserve(GfxReservedSize);
+    }
+
+    /// gow3: the command processor is running the graphics queue (not an async compute queue).
+    bool OnGfxQueue() const {
+        return curr_qid == static_cast<s32>(GfxQueueId);
     }
 
     inline ComputeProgram& GetCsRegs() {
@@ -269,6 +247,8 @@ private:
         std::vector<u32> dcb_buffer;
         std::vector<u32> ccb_buffer;
         std::queue<Task::Handle> submits{};
+        /// gow3 GOW3_GPU_FENCES: each submission's number (submit_counter), with `submits`.
+        std::queue<u64> submit_index{};
         ComputeProgram cs_state{};
     };
     std::array<GpuQueue, NumTotalQueues> mapped_queues{};
@@ -305,13 +285,27 @@ private:
     /// decrements num_submits once it has decoded a submission, before that). Under
     /// submit_mutex with num_submits.
     std::atomic<bool> work_retired{true};
+    /// gow3 GOW3_GPU_FENCES (Bloodborne 0.7, 0fc2921 gpu/cp/command_processor.cpp) and
+    /// GOW3_DECODE_PACING: submissions so far (the generation GPU idle checks), and the frames
+    /// sceGnmSubmitDone ended: (last submission number, frame), under submit_mutex.
+    std::atomic<u64> submit_counter{0};
+    std::deque<std::pair<u64, u64>> frame_ends;
+    /// The lowest number of a submission not decoded yet (~0: none).
+    u64 OldestUndecoded();
+    /// Stage A: frames whose submissions are all decoded retire after them on the GPU
+    /// (GOW3_DECODE_PACING: after stage B and its deferred label writes).
+    void SignalDecodedFrames();
+    /// The signal thread (GOW3_DECODE_PACING: a deferred signal): GPU idle, if nothing was
+    /// submitted since `generation`. Returns whether it was raised.
+    bool SignalGpuIdle(u64 generation);
+    /// Stage A, GOW3_DECODE_PACING: hands GPU idle to stage B in stream order instead of
+    /// draining it (SignalGpuIdle once the labels before it are written).
+    void DeferGpuIdle();
     std::atomic<u32> num_commands{};
     std::atomic<bool> submit_done{};
     std::mutex submit_mutex;
     std::condition_variable_any submit_cv;
     std::queue<Common::UniqueFunction<void>> command_queue{};
-    std::atomic<u32> num_waiting{};
-    std::queue<Common::UniqueFunction<void>> waiting_queue{};
     std::thread::id gpu_id;
 #if defined(__linux__) || defined(_WIN32)
     u32 gpu_tid{};

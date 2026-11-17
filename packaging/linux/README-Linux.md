@@ -2,9 +2,12 @@
 
 A single-file Linux build of the port: `MediEvil-x86_64.AppImage`. The same native runtime and
 shadPS4-based Vulkan renderer as the Windows build, with the same launcher, built for Linux.
+Releases ship only the Windows zip for now, so the AppImage is built from the repository (see
+[Building it yourself](#building-it-yourself)).
 
-> **No game files are included.** You need your own copy of MediEvil (CUSA11227, version 01.00),
-> as an unpacked folder (with `eboot.bin`) or a fake package (`.pkg`).
+> **No game files are included.** You need your own copy of MediEvil (CUSA11227, or the European
+> CUSA12982; version 01.00 or 01.02), as an unpacked folder (with `eboot.bin`) or a fake package
+> (`.pkg`).
 
 ## Run it
 
@@ -41,6 +44,15 @@ with `eboot.bin`, then press **PLAY**.
    `--play` so Game Mode starts the game directly, without the launcher window.
 4. Leave *Compatibility* off: it is a native Linux program, not a Windows one.
 
+**Settings for the Deck:** on a Steam Deck the launcher selects the *Deck Optimized* graphics
+preset on its first run (with settings from an earlier version it asks once). You can also pick it
+yourself: *Graphics quality → Deck Optimized*. It sets 720p borderless, an 80% render scale, Low
+quality with volumetric fog, a 60 FPS limit with VSync off, and the Deck's performance switches
+(*Performance → Steam Deck performance switches*). For a flat 60 FPS, also set a manual GPU clock
+of about 1,200 MHz in the Quick Access Menu (Performance) and keep the frame limit at 60: with an
+uncapped GPU the Deck's 15 W shifts between GPU and CPU and frame times swing. Picking another
+*Graphics quality* ends the preset.
+
 If Steam reports that the AppImage cannot be mounted (no FUSE, e.g. NixOS), set the launch options
 to `APPIMAGE_EXTRACT_AND_RUN=1 %command% --play`.
 
@@ -50,7 +62,9 @@ to `APPIMAGE_EXTRACT_AND_RUN=1 %command% --play`.
   Pop!_OS 24.04+, Fedora 39+, Debian 13+, Arch/Manjaro/EndeavourOS, openSUSE Tumbleweed.
   On an older system the AppImage says so and exits.
 - A Vulkan 1.3 GPU driver: Mesa (RADV for AMD, ANV for Intel) or NVIDIA's driver. The AppImage
-  uses your system's driver.
+  uses your system's driver. With Mesa 25.0 RADV the game runs and plays its sound, but its
+  picture stays black (seen with 25.0.7 on an RX 6800 XT and on a Ryzen 7000 integrated GPU);
+  Mesa 25.3 shows it on the same GPUs.
 - An X11 or Wayland desktop (on Wayland the game window runs through XWayland), or Steam Deck
   Game Mode. Audio through PipeWire (most desktops and SteamOS) or ALSA. Controllers through
   SDL3 (DualSense, DualShock 4, Xbox and others), keyboard too.
@@ -61,11 +75,13 @@ to `APPIMAGE_EXTRACT_AND_RUN=1 %command% --play`.
 From the repository, on a distribution with the requirement above (the AppImage needs the glibc
 of the system it was built on, so build on the oldest one you want to support):
 
-1. Dependencies: Clang 18+ (the GPU library uses C++23 features GCC 13 lacks; GCC 14+ also
-   works), CMake, Ninja, pkg-config, Python 3, glslang, and the development files of the Vulkan
-   loader and headers (1.4), SDL3, FFmpeg (libavcodec, libavformat, libavutil, libswscale,
-   libswresample), Boost (headers), fmt, tsl-robin-map, xxHash, Zydis, VulkanMemoryAllocator and
-   libX11. `shell.nix` lists them for Nix.
+1. Dependencies: Clang 18+ (the GPU library uses C++23 features GCC 13 lacks, and GCC 14 stops
+   at the `_Static_assert` in `src/actor_hook.h`, which GCC does not accept in C++), CMake, Ninja,
+   pkg-config, Python 3, glslang, and the development files of the Vulkan loader and headers
+   (1.4.363 builds it; 1.4.328 is too old: it has neither `VK_DRIVER_ID_MESA_KOSMICKRISP` nor
+   `VK_VALVE_shader_mixed_float_dot_product`), SDL3, FFmpeg (libavcodec, libavformat,
+   libavutil, libswscale, libswresample), Boost (headers), fmt, tsl-robin-map, xxHash, Zydis,
+   VulkanMemoryAllocator and libX11. `shell.nix` lists them for Nix.
 2. Build: `CC=clang CXX=clang++ bash build.sh`
 3. Package: `bash packaging/linux/appimage.sh` → `dist/MediEvil-x86_64.AppImage`. It downloads
    appimagetool 1.9.1, the type2 AppImage runtime 20251108, Python 3.13.16 (python-build-standalone
