@@ -36,6 +36,10 @@ Point the launcher to it in the Game tab. Then Play, Add to Steam (recommended f
   Arch, or anything newer.
 - A graphics card with Vulkan 1.3.
 
+## Known Issues
+
+- Certain levels, such as Hilltop Mausoleum, Inside The Asylum and Hall Of Heroes can load with lighting errors. Though rarer in the newest releases, restarting the level will usually fix this.
+
 ## Credits
 
 Built on [bc160201983's MediEvil PC port](https://github.com/bc160201983/medievil_2019_pc_port), its Linux build by nydal91, and [FelipePrado0's gow3_pc](https://github.com/FelipePrado0/gow3_pc) (from Supermedo and deadinside28's bloodborne_pc), with the [shadPS4](https://github.com/shadps4-emu/shadPS4) renderer.
